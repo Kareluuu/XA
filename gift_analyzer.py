@@ -15,7 +15,7 @@ class TwitterCache:
     def __init__(self, cache_dir: str = ".cache"):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(exist_ok=True)
-        self.cache_duration = timedelta(minutes=30)  # 缓存30分钟
+        self.cache_duration = timedelta(hours=2)  # 缓存2小时
 
     def _get_cache_path(self, key: str) -> Path:
         """获取缓存文件路径"""
@@ -81,10 +81,10 @@ class TwitterAPIv2:
             "Content-Type": "application/json"
         }
         self.rate_limit = {
-            "remaining": 5,  # 降低可用请求数
-            "reset_time": datetime.now() + timedelta(minutes=15),
-            "requests_per_window": 5,  # 每15分钟允许的请求数
-            "window_size": 15  # 时间窗口（分钟）
+            "remaining": 3,  # 从5降到3
+            "reset_time": datetime.now() + timedelta(minutes=30),  # 从15分钟改为30分钟
+            "requests_per_window": 3,  # 从5降到3
+            "window_size": 30  # 从15分钟改为30分钟
         }
         logging.basicConfig(level=logging.INFO)
         self.logger = logging.getLogger(__name__)
@@ -318,14 +318,22 @@ def analyze_twitter_profile(username: str) -> str:
     try:
         api = TwitterAPIv2()
         
-        # 检查是否有缓存数据
+        # 强制优先使用缓存
         cache_key = f"user_{username}"
         user_data = api.cache.get(cache_key)
         
-        # 如果没有缓存，且API限制已达到，则提前返回提示
-        if not user_data and api.rate_limit["remaining"] <= 0:
-            wait_time = (api.rate_limit["reset_time"] - datetime.now()).total_seconds()
-            if wait_time > 0:
+        if user_data:
+            st.success("✅ 使用缓存数据进行分析")
+            # 如果有缓存数据，直接使用缓存中的推文数据
+            user_info = user_data['data']
+            user_id = user_info['id']
+            tweets_cache_key = f"tweets_{user_id}"
+            tweets_data = api.cache.get(tweets_cache_key) or {"data": []}
+            
+        else:
+            # 只有在没有缓存且有足够API限额时才请求新数据
+            if api.rate_limit["remaining"] <= 1:
+                wait_time = (api.rate_limit["reset_time"] - datetime.now()).total_seconds()
                 minutes = int(wait_time / 60)
                 seconds = int(wait_time % 60)
                 return f"""
@@ -335,32 +343,20 @@ def analyze_twitter_profile(username: str) -> str:
 预计恢复时间：{minutes}分{seconds}秒后
 
 建议操作：
-1. 稍后再试
-2. 尝试分析其他用户
-3. 等待 {minutes}分{seconds}秒 后刷新
+1. 稍后再试（{minutes}分{seconds}秒后）
+2. 尝试分析其他用户（可能有缓存）
 """
-        
-        # 如果没有缓存数据，尝试从API获取
-        if not user_data:
+            
             user_data = api.get_user_by_username(username)
+            user_info = user_data['data']
+            user_id = user_info['id']
             
-        if 'data' not in user_data:
-            return "未找到用户数据"
-            
-        user_info = user_data['data']
-        user_id = user_info['id']
-        metrics = user_info.get('public_metrics', {})
-        
-        # 检查推文缓存
-        tweets_cache_key = f"tweets_{user_id}"
-        tweets_data = api.cache.get(tweets_cache_key)
-        
-        # 如果没有推文缓存且API未限制，则获取推文
-        if not tweets_data and api.rate_limit["remaining"] > 0:
-            tweets_data = api.get_user_tweets(user_id)
-        elif not tweets_data:
-            tweets_data = {"data": []}  # 如果无法获取推文，使用空数据
-            st.warning("⚠️ 由于API限制，无法获取最新推文，分析可能不够准确")
+            # 只在有足够配额时获取推文
+            if api.rate_limit["remaining"] > 1:
+                tweets_data = api.get_user_tweets(user_id)
+            else:
+                tweets_data = {"data": []}
+                st.warning("⚠️ 为节省API配额，暂不获取推文数据")
         
         # 分析推文
         analyzer = GiftAnalyzer()
@@ -416,7 +412,7 @@ def analyze_twitter_profile(username: str) -> str:
         return """
 # ❌ 分析失败
 
-抱歉��无法完成分析。请确保：
+抱歉无法完成分析。请确保：
 1. 输入的用户名正确
 2. 该用户存在且未被限制访问
 3. 网络连接正常
