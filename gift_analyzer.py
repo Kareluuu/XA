@@ -7,9 +7,7 @@ import logging
 import json
 import hashlib
 from pathlib import Path
-from dotenv import load_dotenv
-
-load_dotenv()  # 加载.env文件中的环境变量
+import streamlit as st
 
 class TwitterCache:
     """Twitter 数据缓存系统"""
@@ -50,9 +48,9 @@ class TwitterAPIv2:
     
     def __init__(self):
         self.API_BASE = "https://api.twitter.com/2"
-        # OAuth 2.0 凭据
-        self.CLIENT_ID = os.getenv('TWITTER_CLIENT_ID', 'QTRWV3pQSVlBVEVJeXB6RXFmbDI6MTpjaQ')
-        self.CLIENT_SECRET = os.getenv('TWITTER_CLIENT_SECRET', 'sdyzT0lYa5ThsQfSbl5A9Rw1XUfD1lGkQ5ViJivHGdQh45dUv9')
+        # 使用 Streamlit secrets
+        self.CLIENT_ID = st.secrets["TWITTER_CLIENT_ID"]
+        self.CLIENT_SECRET = st.secrets["TWITTER_CLIENT_SECRET"]
         
         # 获取Bearer Token
         self.BEARER_TOKEN = self._get_bearer_token()
