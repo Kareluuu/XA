@@ -109,8 +109,8 @@ class TwitterAPIv2:
 
     def _get_bearer_token(self) -> str:
         """获取OAuth 2.0 Bearer Token"""
-        # 使用固定的Bearer Token
-        return "AAAAAAAAAAAAAAAAAAAAANnAxAEAAAAAAa1%2BfnG9qvhvegO%2Bzp7wXiPziG8%3D6JgZoST8KjlmkStth09RbhYhgxQDrdNi4PbKv"
+        # 使用新的Bearer Token
+        return "AAAAAAAAAAAAAAAAAAAAANnAxAEAAAAAZPAUnhptfF8XZOqZ4ZSoPgm4PEc%3DQQO7FmG2IjsivpHOORNHIOx9Oyfl7kskEluZWK8OHqTr5Wa9VY"
         
         # 以下是OAuth 2.0的方式，暂时注释掉
         """
