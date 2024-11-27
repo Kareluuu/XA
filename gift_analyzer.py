@@ -48,21 +48,42 @@ class TwitterAPIv2:
     
     def __init__(self):
         self.API_BASE = "https://api.twitter.com/2"
-        try:
-            # 尝试从Streamlit secrets获取凭据
-            self.CLIENT_ID = st.secrets["TWITTER_CLIENT_ID"]
-            self.CLIENT_SECRET = st.secrets["TWITTER_CLIENT_SECRET"]
-            st.success("成功加载Streamlit secrets配置")
-        except Exception as e:
-            # 如果无法从secrets获取，使用默认值
+        
+        # 尝试多种方式获取凭据
+        self.CLIENT_ID = None
+        self.CLIENT_SECRET = None
+        
+        # 1. 首先尝试从环境变量获取
+        if os.getenv('TWITTER_CLIENT_ID') and os.getenv('TWITTER_CLIENT_SECRET'):
+            self.CLIENT_ID = os.getenv('TWITTER_CLIENT_ID')
+            self.CLIENT_SECRET = os.getenv('TWITTER_CLIENT_SECRET')
+            st.success("从环境变量加载凭据成功")
+            
+        # 2. 尝试从Streamlit secrets获取
+        if not self.CLIENT_ID:
+            try:
+                self.CLIENT_ID = st.secrets.get("TWITTER_CLIENT_ID")
+                self.CLIENT_SECRET = st.secrets.get("TWITTER_CLIENT_SECRET")
+                if self.CLIENT_ID and self.CLIENT_SECRET:
+                    st.success("从Streamlit secrets加载凭据成功")
+            except Exception as e:
+                st.warning(f"从Streamlit secrets加载失败: {str(e)}")
+        
+        # 3. 如果以上都失败，使用默认值
+        if not self.CLIENT_ID:
             self.CLIENT_ID = 'QTRWV3pQSVlBVEVJeXB6RXFmbDI6MTpjaQ'
             self.CLIENT_SECRET = 'sdyzT0lYa5ThsQfSbl5A9Rw1XUfD1lGkQ5ViJivHGdQh45dUv9'
-            st.warning(f"未找到Streamlit secrets配置（错误：{str(e)}），使用默认凭据")
+            st.warning("使用默认凭据")
             
-            # 显示当前工作目录，帮助调试
-            import os
+            # 显示调试信息
             st.info(f"当前工作目录: {os.getcwd()}")
-            st.info(f"secrets.toml应位于: {os.path.join(os.getcwd(), '.streamlit', 'secrets.toml')}")
+            st.info(f"secrets.toml位置: {os.path.join(os.getcwd(), '.streamlit', 'secrets.toml')}")
+            if os.path.exists(os.path.join(os.getcwd(), '.streamlit', 'secrets.toml')):
+                st.info("secrets.toml文件存在")
+                with open(os.path.join(os.getcwd(), '.streamlit', 'secrets.toml'), 'r') as f:
+                    st.info(f"secrets.toml内容: {f.read()}")
+            else:
+                st.error("secrets.toml文件不存在")
         
         # 获取Bearer Token
         self.BEARER_TOKEN = self._get_bearer_token()
