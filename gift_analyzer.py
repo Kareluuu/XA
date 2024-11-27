@@ -7,6 +7,9 @@ import logging
 import json
 import hashlib
 from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv()  # 加载.env文件中的环境变量
 
 class TwitterCache:
     """Twitter 数据缓存系统"""
@@ -47,7 +50,12 @@ class TwitterAPIv2:
     
     def __init__(self):
         self.API_BASE = "https://api.twitter.com/2"
-        self.BEARER_TOKEN = "AAAAAAAAAAAAAAAAAAAAANnAxAEAAAAAAa1%2BfnG9qvhvegO%2Bzp7wXiPziG8%3D6JgZoST8KjlmkStth09RbhYhgxQDrdNi4PbKv"
+        # OAuth 2.0 凭据
+        self.CLIENT_ID = os.getenv('TWITTER_CLIENT_ID', 'QTRWV3pQSVlBVEVJeXB6RXFmbDI6MTpjaQ')
+        self.CLIENT_SECRET = os.getenv('TWITTER_CLIENT_SECRET', 'sdyzT0lYa5ThsQfSbl5A9Rw1XUfD1lGkQ5ViJivHGdQh45dUv9')
+        
+        # 获取Bearer Token
+        self.BEARER_TOKEN = self._get_bearer_token()
         
         # 初始化缓存系统
         self.cache = TwitterCache()
@@ -67,6 +75,32 @@ class TwitterAPIv2:
         # 设置日志
         logging.basicConfig(level=logging.INFO)
         self.logger = logging.getLogger(__name__)
+
+    def _get_bearer_token(self) -> str:
+        """获取OAuth 2.0 Bearer Token"""
+        if token := os.getenv('TWITTER_BEARER_TOKEN'):
+            return token
+            
+        auth_url = "https://api.twitter.com/oauth2/token"
+        auth_data = {
+            'grant_type': 'client_credentials'
+        }
+        auth_headers = {
+            'Content-Type': 'application/x-www-form-urlencoded'
+        }
+        
+        # 使用Basic认证
+        response = requests.post(
+            auth_url,
+            auth=(self.CLIENT_ID, self.CLIENT_SECRET),
+            data=auth_data,
+            headers=auth_headers
+        )
+        
+        if response.status_code == 200:
+            return response.json()['access_token']
+        else:
+            raise ValueError(f"获取Bearer Token失败: {response.text}")
 
     def get_user_by_username(self, username: str) -> Dict:
         """获取用户信息（带缓存）"""
