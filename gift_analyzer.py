@@ -57,53 +57,33 @@ class TwitterAPIv2:
         if os.getenv('TWITTER_CLIENT_ID') and os.getenv('TWITTER_CLIENT_SECRET'):
             self.CLIENT_ID = os.getenv('TWITTER_CLIENT_ID')
             self.CLIENT_SECRET = os.getenv('TWITTER_CLIENT_SECRET')
-            st.success("从环境变量加载凭据成功")
-            
+        
         # 2. 尝试从Streamlit secrets获取
         if not self.CLIENT_ID:
             try:
                 self.CLIENT_ID = st.secrets.get("TWITTER_CLIENT_ID")
                 self.CLIENT_SECRET = st.secrets.get("TWITTER_CLIENT_SECRET")
-                if self.CLIENT_ID and self.CLIENT_SECRET:
-                    st.success("从Streamlit secrets加载凭据成功")
-            except Exception as e:
-                st.warning(f"从Streamlit secrets加载失败: {str(e)}")
+            except Exception:
+                pass
         
         # 3. 如果以上都失败，使用默认值
         if not self.CLIENT_ID:
             self.CLIENT_ID = 'QTRWV3pQSVlBVEVJeXB6RXFmbDI6MTpjaQ'
             self.CLIENT_SECRET = 'sdyzT0lYa5ThsQfSbl5A9Rw1XUfD1lGkQ5ViJivHGdQh45dUv9'
-            st.warning("使用默认凭据")
-            
-            # 显示调试信息
-            st.info(f"当前工作目录: {os.getcwd()}")
-            st.info(f"secrets.toml位置: {os.path.join(os.getcwd(), '.streamlit', 'secrets.toml')}")
-            if os.path.exists(os.path.join(os.getcwd(), '.streamlit', 'secrets.toml')):
-                st.info("secrets.toml文件存在")
-                with open(os.path.join(os.getcwd(), '.streamlit', 'secrets.toml'), 'r') as f:
-                    st.info(f"secrets.toml内容: {f.read()}")
-            else:
-                st.error("secrets.toml文件不存在")
         
         # 获取Bearer Token
         self.BEARER_TOKEN = self._get_bearer_token()
         
-        # 初始化缓存系统
+        # 初始化其他配置
         self.cache = TwitterCache()
-        
-        # 设置请求头
         self.headers = {
             "Authorization": f"Bearer {self.BEARER_TOKEN}",
             "Content-Type": "application/json"
         }
-        
-        # 速率限���控制
         self.rate_limit = {
             "remaining": 15,
             "reset_time": datetime.now() + timedelta(minutes=15)
         }
-        
-        # 设置日志
         logging.basicConfig(level=logging.INFO)
         self.logger = logging.getLogger(__name__)
 
@@ -136,7 +116,7 @@ class TwitterAPIv2:
         if response.status_code == 200:
             return response.json()['access_token']
         else:
-            raise ValueError(f"获取Bearer Token失���: {response.text}")
+            raise ValueError(f"获取Bearer Token失: {response.text}")
         """
 
     def get_user_by_username(self, username: str) -> Dict:
