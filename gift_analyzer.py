@@ -211,7 +211,7 @@ class TwitterAPIv2:
             raise Exception(f"网络请求失败: {str(e)}")
 
 class GiftAnalyzer:
-    """礼物分�����"""
+    """礼物分"""
     
     def __init__(self):
         # 兴趣关键词映射到礼物类别
@@ -301,20 +301,17 @@ def analyze_twitter_profile(username: str) -> str:
     try:
         api = TwitterAPIv2()
         
-        # 尝试从缓存获取数据
+        # 检查是否有缓存数据
         cache_key = f"user_{username}"
-        cached_data = api.cache.get(cache_key)
+        user_data = api.cache.get(cache_key)
         
-        if cached_data:
-            user_data = cached_data
-            st.success("✅ 使用缓存数据进行分析")
-        else:
-            if api.rate_limit["remaining"] <= 0:
-                wait_time = (api.rate_limit["reset_time"] - datetime.now()).total_seconds()
-                if wait_time > 0:
-                    minutes = int(wait_time / 60)
-                    seconds = int(wait_time % 60)
-                    return f"""
+        # 如果没有缓存，且API限制已达到，则提前返回提示
+        if not user_data and api.rate_limit["remaining"] <= 0:
+            wait_time = (api.rate_limit["reset_time"] - datetime.now()).total_seconds()
+            if wait_time > 0:
+                minutes = int(wait_time / 60)
+                seconds = int(wait_time % 60)
+                return f"""
 # ⏳ API访问频率限制
 
 当前状态：已达到API访问限制
@@ -322,11 +319,14 @@ def analyze_twitter_profile(username: str) -> str:
 
 建议操作：
 1. 稍后再试
-2. 或者尝试分析其他用户
+2. 尝试分析其他用户
+3. 等待 {minutes}分{seconds}秒 后刷新
 """
-            # 获取用户基本信息
-            user_data = api.get_user_by_username(username)
         
+        # 如果没有缓存数据，尝试从API获取
+        if not user_data:
+            user_data = api.get_user_by_username(username)
+            
         if 'data' not in user_data:
             return "未找到用户数据"
             
@@ -334,13 +334,16 @@ def analyze_twitter_profile(username: str) -> str:
         user_id = user_info['id']
         metrics = user_info.get('public_metrics', {})
         
-        # 尝试从缓存获取推文数据
+        # 检查推文缓存
         tweets_cache_key = f"tweets_{user_id}"
-        if cached_tweets := api.cache.get(tweets_cache_key):
-            tweets_data = cached_tweets
-        else:
-            # 获取用户最近推文
+        tweets_data = api.cache.get(tweets_cache_key)
+        
+        # 如果没有推文缓存且API未限制，则获取推文
+        if not tweets_data and api.rate_limit["remaining"] > 0:
             tweets_data = api.get_user_tweets(user_id)
+        elif not tweets_data:
+            tweets_data = {"data": []}  # 如果无法获取推文，使用空数据
+            st.warning("⚠️ 由于API限制，无法获取最新推文，分析可能不够准确")
         
         # 分析推文
         analyzer = GiftAnalyzer()
@@ -349,7 +352,7 @@ def analyze_twitter_profile(username: str) -> str:
         
         # 格式化输出
         return f"""
-# Twitter 用户分析报告
+# Twitter 用户分析报告 {'(缓存数据)' if api.cache.get(cache_key) else ''}
 
 ## 基本信息
 - 用户名: @{username}
@@ -389,9 +392,10 @@ def analyze_twitter_profile(username: str) -> str:
 
 建议操作：
 1. 稍后再试
-2. 或者尝试分析其他用户
+2. 尝试分析其他用户
+3. 等待 {minutes}分{seconds}秒 后刷新
 """
-            
+        
         return """
 # ❌ 分析失败
 
