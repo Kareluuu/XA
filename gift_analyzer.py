@@ -182,47 +182,36 @@ class TwitterAPIv2:
         if self.rate_limit["remaining"] <= 0:
             wait_time = (self.rate_limit["reset_time"] - datetime.now()).total_seconds()
             if wait_time > 0:
-                self.logger.info(f"等待速率限制重置，还需 {wait_time:.0f} 秒")
-                time.sleep(min(wait_time + 1, 900))  # 最多等待15分钟
-                self.rate_limit["remaining"] = 15
-                self.rate_limit["reset_time"] = datetime.now() + timedelta(minutes=15)
-
+                # 不再等待，而是直接提示用户
+                raise Exception("达到速率限制")
+                
     def _make_request(self, endpoint: str, params: Dict) -> Dict:
         """发送API请求"""
-        max_retries = 3
-        retry_delay = 5
-        
-        for attempt in range(max_retries):
-            try:
-                response = requests.get(
-                    endpoint,
-                    headers=self.headers,
-                    params=params,
-                    timeout=10
-                )
+        try:
+            response = requests.get(
+                endpoint,
+                headers=self.headers,
+                params=params,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                self.rate_limit["remaining"] -= 1
+                return response.json()
+            elif response.status_code == 429:  # Rate limit exceeded
+                reset_time = response.headers.get("x-rate-limit-reset")
+                if reset_time:
+                    self.rate_limit["reset_time"] = datetime.fromtimestamp(int(reset_time))
+                self.rate_limit["remaining"] = 0
+                raise Exception("达到速率限制")
+            else:
+                raise Exception(f"API请求失败: {response.status_code}")
                 
-                if response.status_code == 200:
-                    self.rate_limit["remaining"] -= 1
-                    return response.json()
-                elif response.status_code == 429:
-                    reset_time = response.headers.get("x-rate-limit-reset")
-                    if reset_time:
-                        self.rate_limit["reset_time"] = datetime.fromtimestamp(int(reset_time))
-                    self.rate_limit["remaining"] = 0
-                    raise Exception("达到速率限制")
-                else:
-                    raise Exception(f"API请求失败: {response.status_code}")
-                    
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    wait_time = retry_delay * (attempt + 1)
-                    self.logger.info(f"请求失败，{wait_time}秒后重试: {str(e)}")
-                    time.sleep(wait_time)
-                else:
-                    raise
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"网络请求失败: {str(e)}")
 
 class GiftAnalyzer:
-    """礼物分析器"""
+    """礼物分�����"""
     
     def __init__(self):
         # 兴趣关键词映射到礼物类别
@@ -312,8 +301,31 @@ def analyze_twitter_profile(username: str) -> str:
     try:
         api = TwitterAPIv2()
         
-        # 获取用户基本信息
-        user_data = api.get_user_by_username(username)
+        # 尝试从缓存获取数据
+        cache_key = f"user_{username}"
+        cached_data = api.cache.get(cache_key)
+        
+        if cached_data:
+            user_data = cached_data
+            st.success("✅ 使用缓存数据进行分析")
+        else:
+            if api.rate_limit["remaining"] <= 0:
+                wait_time = (api.rate_limit["reset_time"] - datetime.now()).total_seconds()
+                if wait_time > 0:
+                    minutes = int(wait_time / 60)
+                    seconds = int(wait_time % 60)
+                    return f"""
+# ⏳ API访问频率限制
+
+当前状态：已达到API访问限制
+预计恢复时间：{minutes}分{seconds}秒后
+
+建议操作：
+1. 稍后再试
+2. 或者尝试分析其他用户
+"""
+            # 获取用户基本信息
+            user_data = api.get_user_by_username(username)
         
         if 'data' not in user_data:
             return "未找到用户数据"
@@ -322,8 +334,13 @@ def analyze_twitter_profile(username: str) -> str:
         user_id = user_info['id']
         metrics = user_info.get('public_metrics', {})
         
-        # 获取用户最近推文
-        tweets_data = api.get_user_tweets(user_id)
+        # 尝试从缓存获取推文数据
+        tweets_cache_key = f"tweets_{user_id}"
+        if cached_tweets := api.cache.get(tweets_cache_key):
+            tweets_data = cached_tweets
+        else:
+            # 获取用户最近推文
+            tweets_data = api.get_user_tweets(user_id)
         
         # 分析推文
         analyzer = GiftAnalyzer()
@@ -356,28 +373,34 @@ def analyze_twitter_profile(username: str) -> str:
 
 ## 账号描述
 {user_info.get('description', '无描述')}
-
-## 数据来源
-{'使用缓存数据' if api.cache.get(f"user_{username}") else '实时API数据'}
 """
 
     except Exception as e:
-        reset_time = '未知'
-        if api and hasattr(api, 'rate_limit'):
-            reset_time = api.rate_limit.get('reset_time', '未知')
+        if "达到速率限制" in str(e):
+            if api and hasattr(api, 'rate_limit'):
+                wait_time = (api.rate_limit["reset_time"] - datetime.now()).total_seconds()
+                minutes = int(wait_time / 60)
+                seconds = int(wait_time % 60)
+                return f"""
+# ⏳ API访问频率限制
+
+当前状态：已达到API访问限制
+预计恢复时间：{minutes}分{seconds}秒后
+
+建议操作：
+1. 稍后再试
+2. 或者尝试分析其他用户
+"""
             
-        return f"""
-# ⚠️ 访问受限提示
+        return """
+# ❌ 分析失败
 
-当前状态:
-- 错误类型: {type(e).__name__}
-- 错误信息: {str(e)}
-- API限制重置时间: {reset_time}
+抱歉，无法完成分析。请确保：
+1. 输入的用户名正确
+2. 该用户存在且未被限制访问
+3. 网络连接正常
 
-建议操作:
-1. 等待几分钟后重试
-2. 使用缓存数据（如果可用）
-3. 检查网络连接
+建议稍后重试。
 """
 
 def _format_interests(interests: Dict) -> str:
