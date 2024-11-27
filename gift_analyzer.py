@@ -81,8 +81,10 @@ class TwitterAPIv2:
             "Content-Type": "application/json"
         }
         self.rate_limit = {
-            "remaining": 15,
-            "reset_time": datetime.now() + timedelta(minutes=15)
+            "remaining": 5,  # 降低可用请求数
+            "reset_time": datetime.now() + timedelta(minutes=15),
+            "requests_per_window": 5,  # 每15分钟允许的请求数
+            "window_size": 15  # 时间窗口（分钟）
         }
         logging.basicConfig(level=logging.INFO)
         self.logger = logging.getLogger(__name__)
@@ -127,6 +129,10 @@ class TwitterAPIv2:
         if cached_data:
             self.logger.info(f"使用缓存数据: {username}")
             return cached_data
+            
+        # 如果没有缓存且接近限制，直接拒绝
+        if self.rate_limit["remaining"] <= 2:  # 为推文请求保留额度
+            raise Exception("达到速率限制")
             
         try:
             self._check_rate_limit()
@@ -179,15 +185,25 @@ class TwitterAPIv2:
 
     def _check_rate_limit(self):
         """检查并处理速率限制"""
-        if self.rate_limit["remaining"] <= 0:
-            wait_time = (self.rate_limit["reset_time"] - datetime.now()).total_seconds()
+        current_time = datetime.now()
+        
+        # 如果超过时间窗口，重置限制
+        if current_time >= self.rate_limit["reset_time"]:
+            self.rate_limit["remaining"] = self.rate_limit["requests_per_window"]
+            self.rate_limit["reset_time"] = current_time + timedelta(minutes=self.rate_limit["window_size"])
+            
+        # 如果剩余请求数不足，直接拒绝
+        if self.rate_limit["remaining"] <= 1:  # 保留1个请求额度作为缓冲
+            wait_time = (self.rate_limit["reset_time"] - current_time).total_seconds()
             if wait_time > 0:
-                # 不再等待，而是直接提示用户
                 raise Exception("达到速率限制")
-                
+
     def _make_request(self, endpoint: str, params: Dict) -> Dict:
         """发送API请求"""
         try:
+            # 先检查速率限制
+            self._check_rate_limit()
+            
             response = requests.get(
                 endpoint,
                 headers=self.headers,
@@ -196,6 +212,7 @@ class TwitterAPIv2:
             )
             
             if response.status_code == 200:
+                # 成功后减少剩余请求数
                 self.rate_limit["remaining"] -= 1
                 return response.json()
             elif response.status_code == 429:  # Rate limit exceeded
@@ -399,7 +416,7 @@ def analyze_twitter_profile(username: str) -> str:
         return """
 # ❌ 分析失败
 
-抱歉，无法完成分析。请确保：
+抱歉��无法完成分析。请确保：
 1. 输入的用户名正确
 2. 该用户存在且未被限制访问
 3. 网络连接正常
