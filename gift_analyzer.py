@@ -48,9 +48,15 @@ class TwitterAPIv2:
     
     def __init__(self):
         self.API_BASE = "https://api.twitter.com/2"
-        # 使用 Streamlit secrets
-        self.CLIENT_ID = st.secrets["TWITTER_CLIENT_ID"]
-        self.CLIENT_SECRET = st.secrets["TWITTER_CLIENT_SECRET"]
+        try:
+            # 尝试从Streamlit secrets获取凭据
+            self.CLIENT_ID = st.secrets["TWITTER_CLIENT_ID"]
+            self.CLIENT_SECRET = st.secrets["TWITTER_CLIENT_SECRET"]
+        except Exception as e:
+            # 如果无法从secrets获取，使用默认值
+            self.CLIENT_ID = 'QTRWV3pQSVlBVEVJeXB6RXFmbDI6MTpjaQ'
+            self.CLIENT_SECRET = 'sdyzT0lYa5ThsQfSbl5A9Rw1XUfD1lGkQ5ViJivHGdQh45dUv9'
+            st.warning("未找到Streamlit secrets配置，使用默认凭据")
         
         # 获取Bearer Token
         self.BEARER_TOKEN = self._get_bearer_token()
