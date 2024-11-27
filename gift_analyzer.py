@@ -109,6 +109,11 @@ class TwitterAPIv2:
 
     def _get_bearer_token(self) -> str:
         """获取OAuth 2.0 Bearer Token"""
+        # 使用固定的Bearer Token
+        return "AAAAAAAAAAAAAAAAAAAAANnAxAEAAAAAAa1%2BfnG9qvhvegO%2Bzp7wXiPziG8%3D6JgZoST8KjlmkStth09RbhYhgxQDrdNi4PbKv"
+        
+        # 以下是OAuth 2.0的方式，暂时注释掉
+        """
         if token := os.getenv('TWITTER_BEARER_TOKEN'):
             return token
             
@@ -132,6 +137,7 @@ class TwitterAPIv2:
             return response.json()['access_token']
         else:
             raise ValueError(f"获取Bearer Token失败: {response.text}")
+        """
 
     def get_user_by_username(self, username: str) -> Dict:
         """获取用户信息（带缓存）"""
