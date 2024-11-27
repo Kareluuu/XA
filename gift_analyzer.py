@@ -15,7 +15,7 @@ class TwitterCache:
     def __init__(self, cache_dir: str = ".cache"):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(exist_ok=True)
-        self.cache_duration = timedelta(hours=2)  # 缓存2小时
+        self.cache_duration = timedelta(minutes=0)  # 设置为0以禁用缓存
 
     def _get_cache_path(self, key: str) -> Path:
         """获取缓存文件路径"""
@@ -327,6 +327,7 @@ def analyze_twitter_profile(username: str) -> str:
             # 如果有缓存数据，直接使用缓存中的推文数据
             user_info = user_data['data']
             user_id = user_info['id']
+            metrics = user_info.get('public_metrics', {})
             tweets_cache_key = f"tweets_{user_id}"
             tweets_data = api.cache.get(tweets_cache_key) or {"data": []}
             
@@ -350,6 +351,7 @@ def analyze_twitter_profile(username: str) -> str:
             user_data = api.get_user_by_username(username)
             user_info = user_data['data']
             user_id = user_info['id']
+            metrics = user_info.get('public_metrics', {})
             
             # 只在有足够配额时获取推文
             if api.rate_limit["remaining"] > 1:
