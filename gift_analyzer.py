@@ -52,11 +52,17 @@ class TwitterAPIv2:
             # 尝试从Streamlit secrets获取凭据
             self.CLIENT_ID = st.secrets["TWITTER_CLIENT_ID"]
             self.CLIENT_SECRET = st.secrets["TWITTER_CLIENT_SECRET"]
+            st.success("成功加载Streamlit secrets配置")
         except Exception as e:
             # 如果无法从secrets获取，使用默认值
             self.CLIENT_ID = 'QTRWV3pQSVlBVEVJeXB6RXFmbDI6MTpjaQ'
             self.CLIENT_SECRET = 'sdyzT0lYa5ThsQfSbl5A9Rw1XUfD1lGkQ5ViJivHGdQh45dUv9'
-            st.warning("未找到Streamlit secrets配置，使用默认凭据")
+            st.warning(f"未找到Streamlit secrets配置（错误：{str(e)}），使用默认凭据")
+            
+            # 显示当前工作目录，帮助调试
+            import os
+            st.info(f"当前工作目录: {os.getcwd()}")
+            st.info(f"secrets.toml应位于: {os.path.join(os.getcwd(), '.streamlit', 'secrets.toml')}")
         
         # 获取Bearer Token
         self.BEARER_TOKEN = self._get_bearer_token()
