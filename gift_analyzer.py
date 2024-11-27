@@ -97,7 +97,7 @@ class TwitterAPIv2:
             "Content-Type": "application/json"
         }
         
-        # 速率限制控制
+        # 速率限���控制
         self.rate_limit = {
             "remaining": 15,
             "reset_time": datetime.now() + timedelta(minutes=15)
@@ -136,7 +136,7 @@ class TwitterAPIv2:
         if response.status_code == 200:
             return response.json()['access_token']
         else:
-            raise ValueError(f"获取Bearer Token失败: {response.text}")
+            raise ValueError(f"获取Bearer Token失���: {response.text}")
         """
 
     def get_user_by_username(self, username: str) -> Dict:
@@ -165,6 +165,36 @@ class TwitterAPIv2:
             
         except Exception as e:
             self.logger.error(f"获取用户信息失败: {str(e)}")
+            raise
+
+    def get_user_tweets(self, user_id: str, max_results: int = 100) -> Dict:
+        """获取用户最近7天的推文"""
+        cache_key = f"tweets_{user_id}"
+        cached_data = self.cache.get(cache_key)
+        
+        if cached_data:
+            self.logger.info(f"使用缓存的推文数据: {user_id}")
+            return cached_data
+            
+        try:
+            self._check_rate_limit()
+            
+            endpoint = f"{self.API_BASE}/users/{user_id}/tweets"
+            params = {
+                "max_results": max_results,
+                "tweet.fields": "created_at,public_metrics,context_annotations,entities",
+                "exclude": "retweets,replies"
+            }
+            
+            self.logger.info(f"请求用户推文: {user_id}")
+            response_data = self._make_request(endpoint, params)
+            
+            # 缓存结果
+            self.cache.set(cache_key, response_data)
+            return response_data
+            
+        except Exception as e:
+            self.logger.error(f"获取用户推文失败: {str(e)}")
             raise
 
     def _check_rate_limit(self):
@@ -211,20 +241,114 @@ class TwitterAPIv2:
                 else:
                     raise
 
+class GiftAnalyzer:
+    """礼物分析器"""
+    
+    def __init__(self):
+        # 兴趣关键词映射到礼物类别
+        self.interest_gift_mapping = {
+            "科技": ["智能手表", "无线耳机", "平板电脑", "智能音箱"],
+            "游戏": ["游戏机", "游戏周边", "游戏礼品卡", "游戏手柄"],
+            "音乐": ["音乐会门票", "蓝牙音箱", "音乐订阅服务", "乐器"],
+            "美食": ["美食礼券", "烹饪工具", "精品茶具", "咖啡器具"],
+            "运动": ["运动手环", "运动装备", "健身器材", "运动鞋"],
+            "读书": ["电子书阅读器", "精装图书", "读书订阅", "书签"],
+            "艺术": ["艺术画作", "手工艺品", "相机", "绘画工具"],
+            "时尚": ["品牌包包", "饰品", "香水", "时尚配件"]
+        }
+        
+        # 情感词典
+        self.sentiment_words = {
+            "positive": ["喜欢", "爱", "好", "棒", "赞", "享受", "期待", "感恩"],
+            "negative": ["讨厌", "烦", "差", "糟", "失望", "难过", "生气"]
+        }
+
+    def analyze_tweets(self, tweets_data: Dict) -> Dict:
+        """分析推文内容"""
+        if not tweets_data or 'data' not in tweets_data:
+            return {"interests": {}, "sentiment": 0}
+            
+        interests = {}
+        sentiment_score = 0
+        tweet_count = 0
+        
+        for tweet in tweets_data['data']:
+            # 分析推文文本
+            text = tweet.get('text', '').lower()
+            tweet_count += 1
+            
+            # 计算情感分数
+            for word in self.sentiment_words["positive"]:
+                if word in text:
+                    sentiment_score += 1
+            for word in self.sentiment_words["negative"]:
+                if word in text:
+                    sentiment_score -= 1
+            
+            # 统计兴趣
+            for category, keywords in self.interest_gift_mapping.items():
+                for keyword in keywords:
+                    if keyword in text:
+                        interests[category] = interests.get(category, 0) + 1
+                        
+            # 分析实体标签
+            if 'entities' in tweet:
+                for entity_type, entities in tweet['entities'].items():
+                    for entity in entities:
+                        tag = entity.get('tag', '').lower()
+                        for category, keywords in self.interest_gift_mapping.items():
+                            if any(keyword.lower() in tag for keyword in keywords):
+                                interests[category] = interests.get(category, 0) + 1
+        
+        # 标准化情感分数
+        avg_sentiment = sentiment_score / max(tweet_count, 1)
+        
+        return {
+            "interests": interests,
+            "sentiment": avg_sentiment
+        }
+
+    def recommend_gifts(self, analysis_result: Dict) -> list:
+        """基于分析结果推荐礼物"""
+        recommendations = []
+        
+        # 获取最主要的兴趣
+        interests = analysis_result["interests"]
+        if not interests:
+            return ["通用礼品卡", "精美礼品盒", "手工巧克力"]
+            
+        # 按兴趣频率排序
+        sorted_interests = sorted(interests.items(), key=lambda x: x[1], reverse=True)
+        
+        # 根据前三个主要兴趣推荐礼物
+        for category, _ in sorted_interests[:3]:
+            recommendations.extend(self.interest_gift_mapping[category][:2])
+        
+        return recommendations[:5]  # 返回前5个推荐
+
 def analyze_twitter_profile(username: str) -> str:
     """主分析函数（带缓存）"""
-    api = None  # 初始化api变量
+    api = None
     try:
         api = TwitterAPIv2()
         
-        # 尝试获取用户数据
+        # 获取用户基本信息
         user_data = api.get_user_by_username(username)
         
         if 'data' not in user_data:
             return "未找到用户数据"
             
         user_info = user_data['data']
+        user_id = user_info['id']
         metrics = user_info.get('public_metrics', {})
+        
+        # 获取用户最近推文
+        tweets_data = api.get_user_tweets(user_id)
+        
+        # 分析推文
+        analyzer = GiftAnalyzer()
+        analysis_result = analyzer.analyze_tweets(tweets_data)
+        gift_recommendations = analyzer.recommend_gifts(analysis_result)
         
         # 格式化输出
         return f"""
@@ -239,6 +363,16 @@ def analyze_twitter_profile(username: str) -> str:
 - 粉丝数: {metrics.get('followers_count', 0):,}
 - 关注数: {metrics.get('following_count', 0):,}
 - 推文数: {metrics.get('tweet_count', 0):,}
+
+## 兴趣分析
+{_format_interests(analysis_result['interests'])}
+
+## 情感倾向
+情感指数: {analysis_result['sentiment']:.2f}
+({_interpret_sentiment(analysis_result['sentiment'])})
+
+## 礼物推荐
+{_format_recommendations(gift_recommendations)}
 
 ## 账号描述
 {user_info.get('description', '无描述')}
@@ -265,4 +399,29 @@ def analyze_twitter_profile(username: str) -> str:
 2. 使用缓存数据（如果可用）
 3. 检查网络连接
 """
+
+def _format_interests(interests: Dict) -> str:
+    """格式化兴趣输出"""
+    if not interests:
+        return "暂无明显兴趣倾向"
+    
+    sorted_interests = sorted(interests.items(), key=lambda x: x[1], reverse=True)
+    return "\n".join([f"- {category}: {'🌟' * min(count, 5)}" for category, count in sorted_interests])
+
+def _interpret_sentiment(score: float) -> str:
+    """解释情感分数"""
+    if score > 0.5:
+        return "非常积极"
+    elif score > 0:
+        return "较为积极"
+    elif score == 0:
+        return "中性"
+    elif score > -0.5:
+        return "较为消极"
+    else:
+        return "非常消极"
+
+def _format_recommendations(recommendations: list) -> str:
+    """格式化推荐礼物输出"""
+    return "\n".join([f"- {gift}" for gift in recommendations])
         
