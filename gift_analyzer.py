@@ -207,6 +207,7 @@ class TwitterAPIv2:
 
 def analyze_twitter_profile(username: str) -> str:
     """主分析函数（带缓存）"""
+    api = None  # 初始化api变量
     try:
         api = TwitterAPIv2()
         
@@ -241,13 +242,17 @@ def analyze_twitter_profile(username: str) -> str:
 """
 
     except Exception as e:
+        reset_time = '未知'
+        if api and hasattr(api, 'rate_limit'):
+            reset_time = api.rate_limit.get('reset_time', '未知')
+            
         return f"""
 # ⚠️ 访问受限提示
 
 当前状态:
 - 错误类型: {type(e).__name__}
 - 错误信息: {str(e)}
-- API限制重置时间: {getattr(api, 'rate_limit', {}).get('reset_time', '未知')}
+- API限制重置时间: {reset_time}
 
 建议操作:
 1. 等待几分钟后重试
