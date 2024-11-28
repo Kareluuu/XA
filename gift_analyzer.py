@@ -167,15 +167,19 @@ class TwitterAPIv2:
         try:
             self._check_rate_limit()
             
+            # 设置7天前的时间
+            seven_days_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            
             endpoint = f"{self.API_BASE}/users/{user_id}/tweets"
             params = {
-                "max_results": min(max_results, 100),  # 确保不超过每请求100条的限制
-                "tweet.fields": "created_at,public_metrics,context_annotations,entities",
+                "max_results": min(max_results, 100),  # Free tier限制每请求最多100条
+                "tweet.fields": "created_at,public_metrics,context_annotations,entities,lang",
                 "exclude": "retweets,replies",
-                "start_time": (datetime.now() - timedelta(days=7)).isoformat() + "Z"  # 只获取最近7天的推文
+                "start_time": seven_days_ago,  # 只获取最近7天的推文
+                "expansions": "author_id",
             }
             
-            self.logger.info(f"请求用户推文: {user_id}")
+            self.logger.info(f"请求用户最近7天推文: {user_id}")
             response_data = self._make_request(endpoint, params)
             
             # 缓存结果
@@ -263,16 +267,30 @@ class GiftAnalyzer:
     def analyze_tweets(self, tweets_data: Dict) -> Dict:
         """分析推文内容"""
         if not tweets_data or 'data' not in tweets_data:
-            return {"interests": {}, "sentiment": 0}
+            return {
+                "interests": {},
+                "sentiment": 0,
+                "tweet_count": 0,
+                "recent_topics": [],
+                "active_time": None
+            }
             
         interests = {}
         sentiment_score = 0
         tweet_count = 0
+        topics = []
+        tweet_times = []
         
         for tweet in tweets_data['data']:
+            # 确保推文在最近7天内
+            created_at = datetime.strptime(tweet.get('created_at', ''), "%Y-%m-%dT%H:%M:%S.%fZ")
+            if datetime.now() - created_at > timedelta(days=7):
+                continue
+                
             # 分析推文文本
             text = tweet.get('text', '').lower()
             tweet_count += 1
+            tweet_times.append(created_at.hour)
             
             # 计算情感分数
             for word in self.sentiment_words["positive"]:
@@ -282,27 +300,43 @@ class GiftAnalyzer:
                 if word in text:
                     sentiment_score -= 1
             
-            # 统计兴趣
+            # 统计兴趣和话题
             for category, keywords in self.interest_gift_mapping.items():
                 for keyword in keywords:
                     if keyword in text:
                         interests[category] = interests.get(category, 0) + 1
                         
-            # 分析实体标签
+            # 分析实体标签和上下文
             if 'entities' in tweet:
                 for entity_type, entities in tweet['entities'].items():
                     for entity in entities:
                         tag = entity.get('tag', '').lower()
+                        topics.append(tag)
                         for category, keywords in self.interest_gift_mapping.items():
                             if any(keyword.lower() in tag for keyword in keywords):
                                 interests[category] = interests.get(category, 0) + 1
+            
+            if 'context_annotations' in tweet:
+                for context in tweet['context_annotations']:
+                    if 'domain' in context:
+                        topics.append(context['domain'].get('name', '').lower())
         
-        # 标准化情感分数
-        avg_sentiment = sentiment_score / max(tweet_count, 1)
+        # 计算最活跃时间
+        active_hour = max(set(tweet_times), key=tweet_times.count) if tweet_times else None
+        
+        # 获取最常见话题
+        topic_counter = {}
+        for topic in topics:
+            if topic:
+                topic_counter[topic] = topic_counter.get(topic, 0) + 1
+        recent_topics = sorted(topic_counter.items(), key=lambda x: x[1], reverse=True)[:5]
         
         return {
             "interests": interests,
-            "sentiment": avg_sentiment
+            "sentiment": sentiment_score / max(tweet_count, 1),
+            "tweet_count": tweet_count,
+            "recent_topics": [topic for topic, _ in recent_topics],
+            "active_time": active_hour
         }
 
     def recommend_gifts(self, analysis_result: Dict) -> list:
@@ -388,7 +422,12 @@ def analyze_twitter_profile(username: str) -> str:
 ## 社交指标
 - 粉丝数: {metrics.get('followers_count', 0):,}
 - 关注数: {metrics.get('following_count', 0):,}
-- 推文数: {metrics.get('tweet_count', 0):,}
+- 总推文数: {metrics.get('tweet_count', 0):,}
+- 最近7天推文数: {analysis_result['tweet_count']}
+
+## 活跃情况
+- 最活跃时间: {f"每天{analysis_result['active_time']}点" if analysis_result['active_time'] is not None else '未知'}
+- 近期热门话题: {', '.join(analysis_result['recent_topics'][:3]) if analysis_result['recent_topics'] else '无'}
 
 ## 兴趣分析
 {_format_interests(analysis_result['interests'])}
