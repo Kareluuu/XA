@@ -81,11 +81,11 @@ class TwitterAPIv2:
             "Content-Type": "application/json"
         }
         self.rate_limit = {
-            "remaining": 50,  # Free tier每15分钟50次请求
+            "remaining": 50,  # Free tier每15分钟50次
             "reset_time": datetime.now() + timedelta(minutes=15),
             "requests_per_window": 50,  # Free tier限制
             "window_size": 15,  # 15分钟窗口
-            "monthly_limit": 50000,  # 每月限制
+            "monthly_limit": 1500,  # 每月限制
             "monthly_used": 0
         }
         logging.basicConfig(level=logging.INFO)
@@ -155,8 +155,8 @@ class TwitterAPIv2:
             self.logger.error(f"获取用户信息失败: {str(e)}")
             raise
 
-    def get_user_tweets(self, user_id: str, max_results: int = 100) -> Dict:
-        """获取用户最近7天的推文"""
+    def get_user_tweets(self, user_id: str, max_results: int = 10) -> Dict:
+        """获取用户最近7天的推文（Free tier限制）"""
         cache_key = f"tweets_{user_id}"
         cached_data = self.cache.get(cache_key)
         
@@ -167,19 +167,14 @@ class TwitterAPIv2:
         try:
             self._check_rate_limit()
             
-            # 设置7天前的时间
-            seven_days_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
-            
             endpoint = f"{self.API_BASE}/users/{user_id}/tweets"
             params = {
-                "max_results": min(max_results, 100),  # Free tier限制每请求最多100条
-                "tweet.fields": "created_at,public_metrics,context_annotations,entities,lang",
-                "exclude": "retweets,replies",
-                "start_time": seven_days_ago,  # 只获取最近7天的推文
-                "expansions": "author_id",
+                "max_results": min(max_results, 10),  # Free tier限制最大10条
+                "tweet.fields": "created_at,public_metrics",  # 简化请求字段
+                "exclude": "retweets,replies"
             }
             
-            self.logger.info(f"请求用户最近7天推文: {user_id}")
+            self.logger.info(f"请求用户推文: {user_id}")
             response_data = self._make_request(endpoint, params)
             
             # 缓存结果
@@ -194,26 +189,24 @@ class TwitterAPIv2:
         """检查并处理速率限制"""
         current_time = datetime.now()
         
-        # 检查15分钟窗口
+        # 检查月度限制
+        if self.rate_limit["monthly_used"] >= self.rate_limit["monthly_limit"]:
+            raise Exception("达到月度API限制")
+        
+        # 如果超过时间窗口，重置限制
         if current_time >= self.rate_limit["reset_time"]:
             self.rate_limit["remaining"] = self.rate_limit["requests_per_window"]
             self.rate_limit["reset_time"] = current_time + timedelta(minutes=self.rate_limit["window_size"])
-        
-        # 如果剩余请求数不足，拒绝请求
+            
+        # 如果剩余请求数不足，直接拒绝
         if self.rate_limit["remaining"] <= 0:
             wait_time = (self.rate_limit["reset_time"] - current_time).total_seconds()
             if wait_time > 0:
                 raise Exception("达到速率限制")
-        
-        # 检查月度限制
-        if self.rate_limit["monthly_used"] >= self.rate_limit["monthly_limit"]:
-            raise Exception("达到月度API限制")
 
     def _make_request(self, endpoint: str, params: Dict) -> Dict:
         """发送API请求"""
         try:
-            self._check_rate_limit()
-            
             response = requests.get(
                 endpoint,
                 headers=self.headers,
@@ -221,9 +214,9 @@ class TwitterAPIv2:
                 timeout=10
             )
             
-            # 更新速率限制信息
-            remaining = response.headers.get("x-rate-limit-remaining")
-            reset = response.headers.get("x-rate-limit-reset")
+            # 处理响应头中的速率限制信息
+            remaining = response.headers.get('x-rate-limit-remaining')
+            reset = response.headers.get('x-rate-limit-reset')
             
             if remaining is not None:
                 self.rate_limit["remaining"] = int(remaining)
@@ -267,30 +260,16 @@ class GiftAnalyzer:
     def analyze_tweets(self, tweets_data: Dict) -> Dict:
         """分析推文内容"""
         if not tweets_data or 'data' not in tweets_data:
-            return {
-                "interests": {},
-                "sentiment": 0,
-                "tweet_count": 0,
-                "recent_topics": [],
-                "active_time": None
-            }
+            return {"interests": {}, "sentiment": 0}
             
         interests = {}
         sentiment_score = 0
         tweet_count = 0
-        topics = []
-        tweet_times = []
         
         for tweet in tweets_data['data']:
-            # 确保推文在最近7天内
-            created_at = datetime.strptime(tweet.get('created_at', ''), "%Y-%m-%dT%H:%M:%S.%fZ")
-            if datetime.now() - created_at > timedelta(days=7):
-                continue
-                
             # 分析推文文本
             text = tweet.get('text', '').lower()
             tweet_count += 1
-            tweet_times.append(created_at.hour)
             
             # 计算情感分数
             for word in self.sentiment_words["positive"]:
@@ -300,43 +279,27 @@ class GiftAnalyzer:
                 if word in text:
                     sentiment_score -= 1
             
-            # 统计兴趣和话题
+            # 统计兴趣
             for category, keywords in self.interest_gift_mapping.items():
                 for keyword in keywords:
                     if keyword in text:
                         interests[category] = interests.get(category, 0) + 1
                         
-            # 分析实体标签和上下文
+            # 分析实体标签
             if 'entities' in tweet:
                 for entity_type, entities in tweet['entities'].items():
                     for entity in entities:
                         tag = entity.get('tag', '').lower()
-                        topics.append(tag)
                         for category, keywords in self.interest_gift_mapping.items():
                             if any(keyword.lower() in tag for keyword in keywords):
                                 interests[category] = interests.get(category, 0) + 1
-            
-            if 'context_annotations' in tweet:
-                for context in tweet['context_annotations']:
-                    if 'domain' in context:
-                        topics.append(context['domain'].get('name', '').lower())
         
-        # 计算最活跃时间
-        active_hour = max(set(tweet_times), key=tweet_times.count) if tweet_times else None
-        
-        # 获取最常见话题
-        topic_counter = {}
-        for topic in topics:
-            if topic:
-                topic_counter[topic] = topic_counter.get(topic, 0) + 1
-        recent_topics = sorted(topic_counter.items(), key=lambda x: x[1], reverse=True)[:5]
+        # 标准化情感分数
+        avg_sentiment = sentiment_score / max(tweet_count, 1)
         
         return {
             "interests": interests,
-            "sentiment": sentiment_score / max(tweet_count, 1),
-            "tweet_count": tweet_count,
-            "recent_topics": [topic for topic, _ in recent_topics],
-            "active_time": active_hour
+            "sentiment": avg_sentiment
         }
 
     def recommend_gifts(self, analysis_result: Dict) -> list:
@@ -422,12 +385,7 @@ def analyze_twitter_profile(username: str) -> str:
 ## 社交指标
 - 粉丝数: {metrics.get('followers_count', 0):,}
 - 关注数: {metrics.get('following_count', 0):,}
-- 总推文数: {metrics.get('tweet_count', 0):,}
-- 最近7天推文数: {analysis_result['tweet_count']}
-
-## 活跃情况
-- 最活跃时间: {f"每天{analysis_result['active_time']}点" if analysis_result['active_time'] is not None else '未知'}
-- 近期热门话题: {', '.join(analysis_result['recent_topics'][:3]) if analysis_result['recent_topics'] else '无'}
+- 推文数: {metrics.get('tweet_count', 0):,}
 
 ## 兴趣分析
 {_format_interests(analysis_result['interests'])}
