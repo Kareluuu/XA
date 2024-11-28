@@ -15,7 +15,7 @@ class TwitterCache:
     def __init__(self, cache_dir: str = ".cache"):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(exist_ok=True)
-        self.cache_duration = timedelta(hours=1)  # 缓存1小时，避免超出Free Plan限制
+        self.cache_duration = timedelta(minutes=0)  # 设置为0以禁用缓存
 
     def _get_cache_path(self, key: str) -> Path:
         """获取缓存文件路径"""
@@ -74,20 +74,18 @@ class TwitterAPIv2:
         # 获取Bearer Token
         self.BEARER_TOKEN = self._get_bearer_token()
         
-        # 初始化缓存和速率限制
+        # 初始化其他配置
         self.cache = TwitterCache()
-        self.rate_limit = {
-            "remaining_hour": 50,  # 每小时50个请求
-            "remaining_day": 1500,  # 每天1500个请求
-            "reset_time_hour": datetime.now() + timedelta(hours=1),
-            "reset_time_day": datetime.now() + timedelta(days=1)
-        }
-        
         self.headers = {
             "Authorization": f"Bearer {self.BEARER_TOKEN}",
             "Content-Type": "application/json"
         }
-        
+        self.rate_limit = {
+            "remaining": 15,  # Free plan每15分钟15次请求
+            "reset_time": datetime.now() + timedelta(minutes=15),
+            "requests_per_window": 15,  # 每15分钟允许的请求数
+            "window_size": 15  # 时间窗口（分钟）
+        }
         logging.basicConfig(level=logging.INFO)
         self.logger = logging.getLogger(__name__)
 
@@ -133,7 +131,7 @@ class TwitterAPIv2:
             return cached_data
             
         # 如果没有缓存且接近限制，直接拒绝
-        if self.rate_limit["remaining_day"] <= 2:  # 为推文请求保留额度
+        if self.rate_limit["remaining"] <= 2:  # 为推文请求保留额度
             raise Exception("达到速率限制")
             
         try:
@@ -155,12 +153,13 @@ class TwitterAPIv2:
             self.logger.error(f"获取用户信息失败: {str(e)}")
             raise
 
-    def get_user_tweets(self, user_id: str) -> Dict:
-        """获取用户最近7天的推文（Free Plan限制）"""
+    def get_user_tweets(self, user_id: str, max_results: int = 100) -> Dict:
+        """获取用户最近7天的推文"""
         cache_key = f"tweets_{user_id}"
         cached_data = self.cache.get(cache_key)
         
         if cached_data:
+            self.logger.info(f"使用缓存的推文数据: {user_id}")
             return cached_data
             
         try:
@@ -168,19 +167,15 @@ class TwitterAPIv2:
             
             endpoint = f"{self.API_BASE}/users/{user_id}/tweets"
             params = {
-                "max_results": 100,  # Free Plan最大限制
-                "tweet.fields": "created_at,public_metrics",
-                "exclude": "retweets,replies",
-                "start_time": (datetime.now() - timedelta(days=7)).isoformat() + "Z"
+                "max_results": max_results,
+                "tweet.fields": "created_at,public_metrics,context_annotations,entities",
+                "exclude": "retweets,replies"
             }
             
+            self.logger.info(f"请求用户推文: {user_id}")
             response_data = self._make_request(endpoint, params)
             
-            # 更新速率限制计数
-            self.rate_limit["remaining_hour"] -= 1
-            self.rate_limit["remaining_day"] -= 1
-            
-            # 缓存结果（1小时）
+            # 缓存结果
             self.cache.set(cache_key, response_data)
             return response_data
             
@@ -189,27 +184,19 @@ class TwitterAPIv2:
             raise
 
     def _check_rate_limit(self):
-        """检查API速率限制"""
+        """检查并处理速率限制"""
         current_time = datetime.now()
         
-        # 检查小时限制
-        if current_time >= self.rate_limit["reset_time_hour"]:
-            self.rate_limit["remaining_hour"] = 50
-            self.rate_limit["reset_time_hour"] = current_time + timedelta(hours=1)
+        # 如果超过时间窗口，重置限制
+        if current_time >= self.rate_limit["reset_time"]:
+            self.rate_limit["remaining"] = self.rate_limit["requests_per_window"]
+            self.rate_limit["reset_time"] = current_time + timedelta(minutes=self.rate_limit["window_size"])
             
-        # 检查每日限制
-        if current_time >= self.rate_limit["reset_time_day"]:
-            self.rate_limit["remaining_day"] = 1500
-            self.rate_limit["reset_time_day"] = current_time + timedelta(days=1)
-            
-        # 如果超出任一限制，抛出异常
-        if self.rate_limit["remaining_hour"] <= 0:
-            wait_time = (self.rate_limit["reset_time_hour"] - current_time).total_seconds()
-            raise Exception(f"达到每小时API限制，请等待{int(wait_time/60)}分钟")
-            
-        if self.rate_limit["remaining_day"] <= 0:
-            wait_time = (self.rate_limit["reset_time_day"] - current_time).total_seconds()
-            raise Exception(f"达到每日API限制，请等待{int(wait_time/3600)}小时")
+        # 如果剩余请求数不足，直接拒绝
+        if self.rate_limit["remaining"] <= 1:  # 保留1个请求额度作为缓冲
+            wait_time = (self.rate_limit["reset_time"] - current_time).total_seconds()
+            if wait_time > 0:
+                raise Exception("达到速率限制")
 
     def _make_request(self, endpoint: str, params: Dict) -> Dict:
         """发送API请求"""
@@ -331,13 +318,12 @@ def analyze_twitter_profile(username: str) -> str:
     try:
         api = TwitterAPIv2()
         
-        # 强制优先使用缓存
+        # 检查是否有缓存数据
         cache_key = f"user_{username}"
         user_data = api.cache.get(cache_key)
         
         if user_data:
             st.success("✅ 使用缓存数据进行分析")
-            # 如果有缓存数据，直接使用缓存中的推文数据
             user_info = user_data['data']
             user_id = user_info['id']
             metrics = user_info.get('public_metrics', {})
@@ -346,8 +332,8 @@ def analyze_twitter_profile(username: str) -> str:
             
         else:
             # 只有在没有缓存且有足够API限额时才请求新数据
-            if api.rate_limit["remaining_day"] <= 1:
-                wait_time = (api.rate_limit["reset_time_day"] - datetime.now()).total_seconds()
+            if api.rate_limit["remaining"] <= 1:
+                wait_time = (api.rate_limit["reset_time"] - datetime.now()).total_seconds()
                 minutes = int(wait_time / 60)
                 seconds = int(wait_time % 60)
                 return f"""
@@ -367,7 +353,7 @@ def analyze_twitter_profile(username: str) -> str:
             metrics = user_info.get('public_metrics', {})
             
             # 只在有足够配额时获取推文
-            if api.rate_limit["remaining_day"] > 1:
+            if api.rate_limit["remaining"] > 1:
                 tweets_data = api.get_user_tweets(user_id)
             else:
                 tweets_data = {"data": []}
@@ -409,7 +395,7 @@ def analyze_twitter_profile(username: str) -> str:
     except Exception as e:
         if "达到速率限制" in str(e):
             if api and hasattr(api, 'rate_limit'):
-                wait_time = (api.rate_limit["reset_time_day"] - datetime.now()).total_seconds()
+                wait_time = (api.rate_limit["reset_time"] - datetime.now()).total_seconds()
                 minutes = int(wait_time / 60)
                 seconds = int(wait_time % 60)
                 return f"""
