@@ -81,10 +81,12 @@ class TwitterAPIv2:
             "Content-Type": "application/json"
         }
         self.rate_limit = {
-            "remaining": 3,  # 从5降到3
-            "reset_time": datetime.now() + timedelta(minutes=30),  # 从15分钟改为30分钟
-            "requests_per_window": 3,  # 从5降到3
-            "window_size": 30  # 从15分钟改为30分钟
+            "remaining": 50,  # Free tier每15分钟50次请求
+            "reset_time": datetime.now() + timedelta(minutes=15),
+            "requests_per_window": 50,  # Free tier限制
+            "window_size": 15,  # 15分钟窗口
+            "monthly_limit": 50000,  # 每月限制
+            "monthly_used": 0
         }
         logging.basicConfig(level=logging.INFO)
         self.logger = logging.getLogger(__name__)
@@ -167,9 +169,10 @@ class TwitterAPIv2:
             
             endpoint = f"{self.API_BASE}/users/{user_id}/tweets"
             params = {
-                "max_results": max_results,
+                "max_results": min(max_results, 100),  # 确保不超过每请求100条的限制
                 "tweet.fields": "created_at,public_metrics,context_annotations,entities",
-                "exclude": "retweets,replies"
+                "exclude": "retweets,replies",
+                "start_time": (datetime.now() - timedelta(days=7)).isoformat() + "Z"  # 只获取最近7天的推文
             }
             
             self.logger.info(f"请求用户推文: {user_id}")
@@ -187,21 +190,24 @@ class TwitterAPIv2:
         """检查并处理速率限制"""
         current_time = datetime.now()
         
-        # 如果超过时间窗口，重置限制
+        # 检查15分钟窗口
         if current_time >= self.rate_limit["reset_time"]:
             self.rate_limit["remaining"] = self.rate_limit["requests_per_window"]
             self.rate_limit["reset_time"] = current_time + timedelta(minutes=self.rate_limit["window_size"])
-            
-        # 如果剩余请求数不足，直接拒绝
-        if self.rate_limit["remaining"] <= 1:  # 保留1个请求额度作为缓冲
+        
+        # 如果剩余请求数不足，拒绝请求
+        if self.rate_limit["remaining"] <= 0:
             wait_time = (self.rate_limit["reset_time"] - current_time).total_seconds()
             if wait_time > 0:
                 raise Exception("达到速率限制")
+        
+        # 检查月度限制
+        if self.rate_limit["monthly_used"] >= self.rate_limit["monthly_limit"]:
+            raise Exception("达到月度API限制")
 
     def _make_request(self, endpoint: str, params: Dict) -> Dict:
         """发送API请求"""
         try:
-            # 先检查速率限制
             self._check_rate_limit()
             
             response = requests.get(
@@ -211,14 +217,19 @@ class TwitterAPIv2:
                 timeout=10
             )
             
+            # 更新速率限制信息
+            remaining = response.headers.get("x-rate-limit-remaining")
+            reset = response.headers.get("x-rate-limit-reset")
+            
+            if remaining is not None:
+                self.rate_limit["remaining"] = int(remaining)
+            if reset is not None:
+                self.rate_limit["reset_time"] = datetime.fromtimestamp(int(reset))
+            
             if response.status_code == 200:
-                # 成功后减少剩余请求数
-                self.rate_limit["remaining"] -= 1
+                self.rate_limit["monthly_used"] += 1
                 return response.json()
             elif response.status_code == 429:  # Rate limit exceeded
-                reset_time = response.headers.get("x-rate-limit-reset")
-                if reset_time:
-                    self.rate_limit["reset_time"] = datetime.fromtimestamp(int(reset_time))
                 self.rate_limit["remaining"] = 0
                 raise Exception("达到速率限制")
             else:
