@@ -1,6 +1,6 @@
 import os
 import requests
-from typing import Dict
+from typing import Dict, List
 import time
 from datetime import datetime, timedelta
 import logging
@@ -8,6 +8,7 @@ import json
 import hashlib
 from pathlib import Path
 import streamlit as st
+import google.generativeai as genai
 
 class TwitterCache:
     """Twitter 数据缓存系统"""
@@ -220,7 +221,7 @@ class TwitterAPIv2:
                 raise Exception(f"达到速率限制，请等待{minutes}分{seconds}秒")
 
     def _make_request(self, endpoint: str, params: Dict) -> Dict:
-        """发送API请求"""
+        """发API请求"""
         max_retries = 3
         retry_delay = 2
         
@@ -233,253 +234,141 @@ class TwitterAPIv2:
                     timeout=10
                 )
                 
-                # 处理各种HTTP状态码
+                # 检查响应状态
                 if response.status_code == 200:
                     data = response.json()
                     if 'data' in data:
                         return data
                     else:
-                        st.warning("⚠️ API返回的数据格式不符合预期")
-                        raise Exception("数据格式错误")
-                        
-                elif response.status_code == 429:
-                    reset_time = response.headers.get('x-rate-limit-reset')
-                    if reset_time:
-                        wait_time = int(datetime.fromtimestamp(int(reset_time)).timestamp() - datetime.now().timestamp())
-                        st.warning(f"⏳ 请求频率超限，需要等待 {wait_time} 秒后重试")
-                    else:
-                        st.warning("⏳ 请求频率超限，请稍后重试")
-                    raise Exception("Too Many Requests")
-                    
+                        raise Exception("API返回数据格式错误")
                 elif response.status_code == 404:
-                    st.error("❌ 未找到指定用户")
                     raise Exception("用户不存在")
-                    
                 elif response.status_code == 401:
-                    st.error("🔒 API认证失败，请检查访问令牌")
-                    raise Exception("认证失败")
-                    
-                elif response.status_code == 403:
-                    st.error("🚫 没有访问权限")
-                    raise Exception("访问被拒绝")
-                    
+                    raise Exception("认证失败，请检查Token")
                 else:
-                    st.error(f"❌ API请求失败 (HTTP {response.status_code})")
-                    raise Exception(f"请求失败: {response.status_code}")
+                    raise Exception(f"API请求失败: {response.status_code}")
                     
             except requests.exceptions.RequestException as e:
                 if attempt < max_retries - 1:
-                    st.info(f"⚡ 网络请求失败，正在重试 ({attempt + 1}/{max_retries})")
                     time.sleep(retry_delay * (attempt + 1))
                     continue
-                st.error("🌐 网络连接失败，请检查网络状态")
                 raise Exception(f"网络请求失败: {str(e)}")
 
-class GiftAnalyzer:
-    """礼物分"""
+class TweetAnalyzer:
+    """使用Gemini进行推文分析"""
     
     def __init__(self):
-        # 兴趣关键词映射到礼物类别
-        self.interest_gift_mapping = {
-            "科技": ["智能手表", "无线耳机", "平板电脑", "智能音箱"],
-            "游戏": ["游戏机", "游戏周边", "游戏礼品卡", "游戏手柄"],
-            "音乐": ["音乐会门票", "蓝牙音箱", "音乐订阅服务", "乐器"],
-            "美食": ["美食礼券", "烹饪工具", "精品茶具", "咖啡器具"],
-            "运动": ["运动手环", "运动装备", "健身器材", "运动鞋"],
-            "读书": ["电子书阅读器", "精装图书", "读书订阅", "书签"],
-            "艺术": ["艺术画作", "手工艺品", "相机", "绘画工具"],
-            "时尚": ["品牌包包", "饰品", "香水", "时尚配件"]
-        }
+        # 配置Gemini
+        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+        self.model = genai.GenerativeModel('gemini-1.5-pro')
+    
+    def analyze_tweets(self, tweets: List[Dict]) -> Dict:
+        """使用Gemini分析推文"""
+        if not tweets:
+            return {
+                "topics": [],
+                "keywords": [],
+                "analysis": "无推文数据可供分析",
+                "gift_suggestions": ["通用礼品卡", "精美礼品盒", "手工巧克力"]
+            }
         
-        # 情感词典
-        self.sentiment_words = {
-            "positive": ["喜欢", "爱", "好", "棒", "赞", "享受", "期待", "感恩"],
-            "negative": ["讨厌", "烦", "差", "糟", "失望", "难过", "生气"]
-        }
+        # 准备推文文本
+        tweet_texts = [tweet.get('text', '') for tweet in tweets]
+        prompt = f"""
+分析以下最近7天的推文内容：
 
-    def analyze_tweets(self, tweets_data: Dict) -> Dict:
-        """分析推文内容"""
-        prompt = """
-        分析目标：分析用户最近7天的推文内容，总结用户的兴趣和喜好。
+{tweet_texts}
 
-        分析维度：
-        1. 话题倾向：
-           - 统计推文中提到的主要话题
-           - 计算每个话题的出现频率
-           - 识别用户最关注的前3个话题领域
+请提供：
+1. 主要话题（最多3个）
+2. 关键词（最多5个）
+3. 内容分析（用户兴趣和偏好）
+4. 基于分析的礼物建议（最多5个）
 
-        2. 关键词分析：
-           - 提取推文中的高频关键词
-           - 过滤常见停用词
-           - 识别最具代表性的5个关键词
-
-        3. 情感特征：
-           - 分析推文的整体情感倾向
-           - 识别用户表达最强烈的情感
-           - 判断用户对不同话题的态度
-
-        4. 兴趣洞察：
-           - 基于话题和关键词识别用户兴趣
-           - 发现用户的潜在喜好
-           - 总结用户的消费倾向
-
-        输出重点：
-        1. 明确的兴趣分类
-        2. 具体的话题偏好
-        3. 情感倾向总结
-        4. 个性化礼物建议
-        """
+以JSON格式返回结果。
+"""
         
-        if not tweets_data or 'data' not in tweets_data:
-            return {"interests": {}, "sentiment": 0, "topics": {}, "keywords": {}}
-            
-        interests = {}
-        sentiment_score = 0
-        tweet_count = 0
-        topics = {}
-        keywords = {}
-        
-        for tweet in tweets_data['data']:
-            text = tweet.get('text', '').lower()
-            tweet_count += 1
-            
-            # 情感分析
-            for word in self.sentiment_words["positive"]:
-                if word in text:
-                    sentiment_score += 1
-            for word in self.sentiment_words["negative"]:
-                if word in text:
-                    sentiment_score -= 1
-            
-            # 话题和兴趣分析
-            for category, keywords_list in self.interest_gift_mapping.items():
-                for keyword in keywords_list:
-                    if keyword.lower() in text:
-                        interests[category] = interests.get(category, 0) + 1
-                        topics[category] = topics.get(category, 0) + 1
-            
-            # 关键词提取
-            words = text.split()
-            for word in words:
-                if len(word) > 3 and word not in self.stop_words:  # 添加停用词过滤
-                    keywords[word] = keywords.get(word, 0) + 1
-        
-        # 标准化情感分数
-        avg_sentiment = sentiment_score / max(tweet_count, 1)
-        
-        return {
-            "interests": interests,
-            "sentiment": avg_sentiment,
-            "topics": topics,
-            "keywords": keywords,
-            "tweet_count": tweet_count
-        }
-
-    def recommend_gifts(self, analysis_result: Dict) -> list:
-        """基于分析结果推荐礼物"""
-        recommendations = []
-        
-        # 获取最主要的兴趣
-        interests = analysis_result["interests"]
-        if not interests:
-            return ["通用礼品卡", "精美礼品盒", "手工巧克力"]
-            
-        # 按兴趣频率���序
-        sorted_interests = sorted(interests.items(), key=lambda x: x[1], reverse=True)
-        
-        # 根据前三个主要兴趣推荐礼物
-        for category, _ in sorted_interests[:3]:
-            recommendations.extend(self.interest_gift_mapping[category][:2])
-        
-        return recommendations[:5]  # 返回前5个推荐
+        try:
+            response = self.model.generate_content(prompt)
+            result = json.loads(response.text)
+            return result
+        except Exception as e:
+            st.error(f"Gemini分析失败: {str(e)}")
+            return {
+                "topics": [],
+                "keywords": [],
+                "analysis": "分析过程出现错误",
+                "gift_suggestions": ["通用礼品卡"]
+            }
 
 def analyze_twitter_profile(username: str) -> str:
     """主分析函数"""
     api = None
     try:
         api = TwitterAPIv2()
+        tweet_analyzer = TweetAnalyzer()
         
+        # 验证用户名
         if not username or not username.strip():
-            st.warning("⚠️ 请输入有效的用户名")
-            return "# ⚠️ 无效的用户名\n\n请输入有效的Twitter用户名（不需要包含@符号）"
+            return "# ⚠️ 无效的用户名\n\n请输入有效的X用户名（不需要包含@符号）"
         
         username = username.strip().lstrip('@')
         
         try:
-            with st.spinner("正在获取用户信息..."):
-                user_data = api.get_user_by_username(username)
+            # 获取用户信息
+            st.info("正在获取用户信息...")
+            user_data = api.get_user_by_username(username)
             
             if not user_data or 'data' not in user_data:
-                st.error("❌ 无法获取用户数据")
                 return "# ❌ 无效的用户数据\n\n无法获取用户信息，请稍后重试"
-            
-            user_info = user_data['data']
-            user_id = user_info['id']
-            
-            with st.spinner("正在获取最近7天的推文..."):
-                tweets_data = api.get_user_tweets(user_id)
-            
-            if not tweets_data.get('data'):
-                st.info("ℹ️ 未找到最近7天的推文")
-            
-            # 分析推文
-            analyzer = GiftAnalyzer()
-            analysis_result = analyzer.analyze_tweets(tweets_data)
-            gift_recommendations = analyzer.recommend_gifts(analysis_result)
-            
-            # 统计推文主题和关键词
-            tweet_topics = {}
-            keywords = {}
-            total_tweets = len(tweets_data.get('data', []))
-            
-            for tweet in tweets_data.get('data', []):
-                text = tweet.get('text', '').lower()
-                # 分析主题
-                for category, words in analyzer.interest_gift_mapping.items():
-                    if any(word.lower() in text for word in words):
-                        tweet_topics[category] = tweet_topics.get(category, 0) + 1
                 
-                # 提取关键词
-                words = text.split()
-                for word in words:
-                    if len(word) > 3:  # 只统计长度大于3的词
-                        keywords[word] = keywords.get(word, 0) + 1
+            user_id = user_data['data']['id']
             
-            # 排序获取最常见的主题和关键词
-            top_topics = sorted(tweet_topics.items(), key=lambda x: x[1], reverse=True)[:3]
-            top_keywords = sorted(keywords.items(), key=lambda x: x[1], reverse=True)[:5]
+            # 获取最近7天的推文
+            st.info("正在获取最近7天的推文...")
+            tweets_data = {"data": []}
+            
+            if api.rate_limit["remaining"] > 1:
+                try:
+                    tweets_data = api.get_user_tweets(user_id)
+                except Exception as e:
+                    st.warning(f"获取推文失败: {str(e)}")
+            
+            # 使用Gemini分析推文
+            st.info("正在分析推文内容...")
+            analysis_result = tweet_analyzer.analyze_tweets(tweets_data.get('data', []))
             
             return f"""
 # X用户推文分析报告
 
 ## 推文分析
 - 分析时间范围：最近7天
-- 分析推文数量：{total_tweets}条
+- 分析推文数量：{len(tweets_data.get('data', []))}条
 
 ### 主要话题
-{_format_topics(top_topics, total_tweets)}
+{_format_topics(analysis_result.get('topics', []))}
 
 ### 高频关键词
-{_format_keywords(top_keywords)}
+{_format_keywords(analysis_result.get('keywords', []))}
 
 ## 分析结果
-{_format_analysis_result(analysis_result)}
+{analysis_result.get('analysis', '无法生成分析结果')}
 
 ## 礼物推荐
 基于以上分析，为您推荐以下礼物：
-{_format_recommendations(gift_recommendations)}
+{_format_recommendations(analysis_result.get('gift_suggestions', []))}
 """
             
         except Exception as e:
-            if "Too Many Requests" in str(e):
-                return "# ⏳ 请求频率限制\n\n请等待一段时间后重试"
-            elif "用户不存在" in str(e):
+            st.error(f"错误详情: {str(e)}")
+            if "用户不存在" in str(e):
                 return "# ❌ 用户不存在\n\n该用户名不存在，请检查拼写是否正确"
             elif "认证失败" in str(e):
-                return "# 🔒 认证失败\n\n请检查API访问令牌是否有效"
+                return "# ❌ 认证失败\n\n请检查API Token是否有效"
             raise
             
     except Exception as e:
+        st.error(f"发生错误: {str(e)}")
         return f"""
 # ❌ 分析失败
 
@@ -493,77 +382,21 @@ def analyze_twitter_profile(username: str) -> str:
 建议稍后重试。
 """
 
-def _format_topics(topics: list, total_tweets: int) -> str:
+def _format_topics(topics: list) -> str:
     """格式化主题输出"""
     if not topics:
         return "暂无明显主题"
-    
-    result = []
-    for topic, count in topics:
-        percentage = (count / total_tweets * 100) if total_tweets > 0 else 0
-        result.append(f"- {topic}: {percentage:.1f}% ({count}条推文)")
-    return "\n".join(result)
+    return "\n".join([f"- {topic}" for topic in topics])
 
 def _format_keywords(keywords: list) -> str:
     """格式化关键词输出"""
     if not keywords:
         return "暂无高频关键词"
-    
-    return "\n".join([f"- {word}: 出现{count}次" for word, count in keywords])
-
-def _format_analysis_result(analysis_result: Dict) -> str:
-    """格式化分析结果"""
-    interests = analysis_result.get('interests', {})
-    sentiment = analysis_result.get('sentiment', 0)
-    topics = analysis_result.get('topics', {})
-    keywords = analysis_result.get('keywords', {})
-    tweet_count = analysis_result.get('tweet_count', 0)
-    
-    result = []
-    result.append("📊 数据概览：")
-    result.append(f"- 分析推文数量：{tweet_count}条")
-    result.append(f"- 情感倾向：{_interpret_sentiment(sentiment)}")
-    
-    result.append("\n🎯 主要话题：")
-    if topics:
-        sorted_topics = sorted(topics.items(), key=lambda x: x[1], reverse=True)[:3]
-        for topic, count in sorted_topics:
-            percentage = (count / tweet_count * 100) if tweet_count > 0 else 0
-            result.append(f"- {topic}: {percentage:.1f}% ({count}条推文)")
-    else:
-        result.append("- 暂无明显话题倾向")
-    
-    result.append("\n🔍 兴趣洞察：")
-    if interests:
-        sorted_interests = sorted(interests.items(), key=lambda x: x[1], reverse=True)
-        for interest, count in sorted_interests:
-            result.append(f"- {interest}")
-    else:
-        result.append("- 暂无明显兴趣倾向")
-    
-    result.append("\n💡 个性特征：")
-    if keywords:
-        top_keywords = sorted(keywords.items(), key=lambda x: x[1], reverse=True)[:5]
-        result.append("高频关键词：")
-        for word, count in top_keywords:
-            result.append(f"- {word}（出现{count}次）")
-    
-    return "\n".join(result)
-
-def _interpret_sentiment(score: float) -> str:
-    """解释情感分数"""
-    if score > 0.5:
-        return "非常积极"
-    elif score > 0:
-        return "较为积极"
-    elif score == 0:
-        return "中性"
-    elif score > -0.5:
-        return "较为消极"
-    else:
-        return "非常消极"
+    return "\n".join([f"- {keyword}" for keyword in keywords])
 
 def _format_recommendations(recommendations: list) -> str:
     """格式化推荐礼物输出"""
+    if not recommendations:
+        return "- 通用礼品卡\n- 精美礼品盒"
     return "\n".join([f"- {gift}" for gift in recommendations])
         
