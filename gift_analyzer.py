@@ -15,7 +15,7 @@ class TwitterCache:
     def __init__(self, cache_dir: str = ".cache"):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(exist_ok=True)
-        self.cache_duration = timedelta(hours=1)  # 缓存1小时
+        self.cache_duration = timedelta(hours=24)  # 增加缓存时间到24小时
 
     def _get_cache_path(self, key: str) -> Path:
         """获取缓存文件路径"""
@@ -48,7 +48,31 @@ class TwitterAPIv2:
     
     def __init__(self):
         self.API_BASE = "https://api.twitter.com/2"
-        self.BEARER_TOKEN = "AAAAAAAAAAAAAAAAAAAAANnAxAEAAAAAZPAUnhptfF8XZOqZ4ZSoPgm4PEc%3DQQO7FmG2IjsivpHOORNHIOx9Oyfl7kskEluZWK8OHqTr5Wa9VY"
+        
+        # 尝试多种方式获取凭据
+        self.CLIENT_ID = None
+        self.CLIENT_SECRET = None
+        
+        # 1. 首先尝试从环境变量获取
+        if os.getenv('TWITTER_CLIENT_ID') and os.getenv('TWITTER_CLIENT_SECRET'):
+            self.CLIENT_ID = os.getenv('TWITTER_CLIENT_ID')
+            self.CLIENT_SECRET = os.getenv('TWITTER_CLIENT_SECRET')
+        
+        # 2. 尝试从Streamlit secrets获取
+        if not self.CLIENT_ID:
+            try:
+                self.CLIENT_ID = st.secrets.get("TWITTER_CLIENT_ID")
+                self.CLIENT_SECRET = st.secrets.get("TWITTER_CLIENT_SECRET")
+            except Exception:
+                pass
+        
+        # 3. 如果以上都失败，使用默认值
+        if not self.CLIENT_ID:
+            self.CLIENT_ID = 'QTRWV3pQSVlBVEVJeXB6RXFmbDI6MTpjaQ'
+            self.CLIENT_SECRET = 'sdyzT0lYa5ThsQfSbl5A9Rw1XUfD1lGkQ5ViJivHGdQh45dUv9'
+        
+        # 获取Bearer Token
+        self.BEARER_TOKEN = self._get_bearer_token()
         
         # 初始化其他配置
         self.cache = TwitterCache()
@@ -57,37 +81,70 @@ class TwitterAPIv2:
             "Content-Type": "application/json",
             "User-Agent": "v2UserLookupPython"
         }
-        
-        # Free Plan的限制：每15分钟10次请求
         self.rate_limit = {
-            "remaining": 10,
+            "remaining": 10,  # Free Plan每15分钟允许10次请求
             "reset_time": datetime.now() + timedelta(minutes=15),
-            "requests_per_window": 10,  # Free Plan: 10 requests per 15 minutes
-            "window_size": 15
+            "requests_per_window": 10,  # Free Plan限制
+            "window_size": 15  # 时间窗口（分钟）
         }
         logging.basicConfig(level=logging.INFO)
         self.logger = logging.getLogger(__name__)
 
+    def _get_bearer_token(self) -> str:
+        """获取OAuth 2.0 Bearer Token"""
+        # 使用新的Bearer Token
+        return "AAAAAAAAAAAAAAAAAAAAANnAxAEAAAAAZPAUnhptfF8XZOqZ4ZSoPgm4PEc%3DQQO7FmG2IjsivpHOORNHIOx9Oyfl7kskEluZWK8OHqTr5Wa9VY"
+        
+        # 以下是OAuth 2.0的方式，暂时注释掉
+        """
+        if token := os.getenv('TWITTER_BEARER_TOKEN'):
+            return token
+            
+        auth_url = "https://api.twitter.com/oauth2/token"
+        auth_data = {
+            'grant_type': 'client_credentials'
+        }
+        auth_headers = {
+            'Content-Type': 'application/x-www-form-urlencoded'
+        }
+        
+        # 使用Basic认证
+        response = requests.post(
+            auth_url,
+            auth=(self.CLIENT_ID, self.CLIENT_SECRET),
+            data=auth_data,
+            headers=auth_headers
+        )
+        
+        if response.status_code == 200:
+            return response.json()['access_token']
+        else:
+            raise ValueError(f"获取Bearer Token失: {response.text}")
+        """
+
     def get_user_by_username(self, username: str) -> Dict:
-        """获取用户信息（带缓存）"""
+        """获取用户信息"""
         try:
             self._check_rate_limit()
             
             endpoint = f"{self.API_BASE}/users/by/username/{username}"
             params = {
-                "user.fields": "description,created_at,location,public_metrics,verified,profile_image_url"
+                "user.fields": "id,name,username,created_at,description,public_metrics,verified,location"
             }
             
             response = requests.get(
                 endpoint,
                 headers=self.headers,
-                params=params
+                params=params,
+                timeout=10
             )
             
             if response.status_code == 200:
                 return response.json()
             elif response.status_code == 404:
                 raise Exception("用户不存在")
+            elif response.status_code == 401:
+                raise Exception("认证失败，请检查Bearer Token")
             else:
                 raise Exception(f"API请求失败: {response.status_code}")
                 
@@ -102,9 +159,10 @@ class TwitterAPIv2:
             
             endpoint = f"{self.API_BASE}/users/{user_id}/tweets"
             params = {
-                "max_results": max_results,
-                "tweet.fields": "created_at,text",
+                "max_results": max_results,  # Free Plan限制每页10条
+                "tweet.fields": "created_at,text,public_metrics,author_id",
                 "exclude": "retweets,replies",
+                # 严格按照Twitter API要求的时间格式
                 "start_time": (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
             }
             
@@ -116,14 +174,10 @@ class TwitterAPIv2:
             
             if response.status_code == 200:
                 return response.json()
-            elif response.status_code == 429:  # Rate limit
-                reset_time = response.headers.get("x-rate-limit-reset")
-                if reset_time:
-                    self.rate_limit["reset_time"] = datetime.fromtimestamp(int(reset_time))
-                self.rate_limit["remaining"] = 0
-                raise Exception("达到速率限制")
+            elif response.status_code == 404:
+                raise Exception("找不到用户推文")
             else:
-                raise Exception(f"API请求失败: {response.status_code}")
+                raise Exception(f"获取推文失败: {response.status_code}")
                 
         except Exception as e:
             self.logger.error(f"获取推文失败: {str(e)}")
@@ -137,22 +191,19 @@ class TwitterAPIv2:
         if current_time >= self.rate_limit["reset_time"]:
             self.rate_limit["remaining"] = self.rate_limit["requests_per_window"]
             self.rate_limit["reset_time"] = current_time + timedelta(minutes=self.rate_limit["window_size"])
-        
-        # 保留2个请求额度用于必要操作
-        if self.rate_limit["remaining"] <= 2:
+            
+        # 如果剩余请求数不足，直接拒绝
+        if self.rate_limit["remaining"] <= 2:  # 保留2个请求额度作为缓冲
             wait_time = (self.rate_limit["reset_time"] - current_time).total_seconds()
             if wait_time > 0:
                 minutes = int(wait_time / 60)
                 seconds = int(wait_time % 60)
                 raise Exception(f"达到速率限制，请等待{minutes}分{seconds}秒")
-        
-        # 减少剩余请求数
-        self.rate_limit["remaining"] -= 1
 
     def _make_request(self, endpoint: str, params: Dict) -> Dict:
         """发送API请求"""
-        max_retries = 2
-        retry_delay = 1
+        max_retries = 3
+        retry_delay = 2
         
         for attempt in range(max_retries):
             try:
@@ -163,23 +214,28 @@ class TwitterAPIv2:
                     timeout=10
                 )
                 
+                # 更新速率限制信息
+                remaining = response.headers.get('x-rate-limit-remaining')
+                if remaining is not None:
+                    self.rate_limit["remaining"] = int(remaining)
+                
+                reset = response.headers.get('x-rate-limit-reset')
+                if reset is not None:
+                    self.rate_limit["reset_time"] = datetime.fromtimestamp(int(reset))
+                
                 if response.status_code == 200:
                     return response.json()
                 elif response.status_code == 429:
-                    reset_time = response.headers.get("x-rate-limit-reset")
-                    if reset_time:
-                        self.rate_limit["reset_time"] = datetime.fromtimestamp(int(reset_time))
-                    self.rate_limit["remaining"] = 0
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay * (attempt + 1))
+                        continue
                     raise Exception("达到速率限制")
                 else:
-                    if attempt < max_retries - 1:
-                        time.sleep(retry_delay)
-                        continue
                     raise Exception(f"API请求失败: {response.status_code}")
                     
             except requests.exceptions.RequestException as e:
                 if attempt < max_retries - 1:
-                    time.sleep(retry_delay)
+                    time.sleep(retry_delay * (attempt + 1))
                     continue
                 raise Exception(f"网络请求失败: {str(e)}")
 
