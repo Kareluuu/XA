@@ -81,10 +81,12 @@ class TwitterAPIv2:
             "Content-Type": "application/json"
         }
         self.rate_limit = {
-            "remaining": 3,  # 从5降到3
-            "reset_time": datetime.now() + timedelta(minutes=30),  # 从15分钟改为30分钟
-            "requests_per_window": 3,  # 从5降到3
-            "window_size": 30  # 从15分钟改为30分钟
+            "remaining": 10,  # Free Plan每15分钟10次
+            "reset_time": datetime.now() + timedelta(minutes=15),
+            "requests_per_window": 10,  # 从50改为10
+            "window_size": 15,
+            "monthly_limit": 50,  # Free Plan每月限制
+            "monthly_used": 0
         }
         logging.basicConfig(level=logging.INFO)
         self.logger = logging.getLogger(__name__)
@@ -123,8 +125,9 @@ class TwitterAPIv2:
 # 📊 API调用统计 ({current_time.strftime('%Y-%m-%d %H:%M:%S')})
 
 ## 当前15分钟窗口
-- API调用次数: {self.api_stats["calls_in_window"]}
+- API调用次数: {self.api_stats["calls_in_window"]}/10
 - 剩余可用次数: {self.rate_limit["remaining"]}
+- 距离重置: {((self.rate_limit["reset_time"] - current_time).total_seconds() / 60):.1f}分钟
 - 平均调用频率: {self.api_stats["calls_in_window"] / window_duration:.2f} 次/分钟
 
 ## 累计统计
@@ -197,13 +200,16 @@ class TwitterAPIv2:
             self.logger.error(f"获取用户信息失败: {str(e)}")
             raise
 
-    def get_user_tweets(self, user_id: str, max_results: int = 100) -> Dict:
-        """获取用户最近7天的推文"""
+    def get_user_tweets(self, user_id: str, max_results: int = 5) -> Dict:
+        """获取用户最近7天的推文
+        Free Plan限制：
+        - 每次最多返回100条推文
+        - 只能访问最近7天的公开推文
+        """
         cache_key = f"tweets_{user_id}"
         cached_data = self.cache.get(cache_key)
         
         if cached_data:
-            self.logger.info(f"使用缓存的推文数据: {user_id}")
             return cached_data
             
         try:
@@ -211,9 +217,10 @@ class TwitterAPIv2:
             
             endpoint = f"{self.API_BASE}/users/{user_id}/tweets"
             params = {
-                "max_results": max_results,
-                "tweet.fields": "created_at,public_metrics,context_annotations,entities",
-                "exclude": "retweets,replies"
+                "max_results": min(max_results, 10),  # 限制每次请求数量
+                "tweet.fields": "created_at,public_metrics",
+                "exclude": "retweets,replies",
+                "start_time": (datetime.now() - timedelta(days=7)).isoformat() + "Z"
             }
             
             self.logger.info(f"请求用户推文: {user_id}")
@@ -228,16 +235,20 @@ class TwitterAPIv2:
             raise
 
     def _check_rate_limit(self):
-        """检查并处理速率限制"""
+        """检查API限制"""
         current_time = datetime.now()
         
-        # 如果超过时间窗口，重置限制
+        # 检查15分钟窗口限制
         if current_time >= self.rate_limit["reset_time"]:
             self.rate_limit["remaining"] = self.rate_limit["requests_per_window"]
             self.rate_limit["reset_time"] = current_time + timedelta(minutes=self.rate_limit["window_size"])
-            
-        # 如果剩余请求数不足，直接拒绝
-        if self.rate_limit["remaining"] <= 1:  # 保留1个请求额度作为缓冲
+        
+        # 检查每月限制
+        if self.rate_limit["monthly_used"] >= self.rate_limit["monthly_limit"]:
+            raise Exception("已达到本月API调用限制")
+        
+        # 如果剩余请求数不足，拒绝请求
+        if self.rate_limit["remaining"] <= 1:  # 保留1个请求作为缓冲
             wait_time = (self.rate_limit["reset_time"] - current_time).total_seconds()
             if wait_time > 0:
                 raise Exception("达到速率限制")
@@ -287,7 +298,7 @@ class GiftAnalyzer:
         self.interest_gift_mapping = {
             "科技": ["智能手表", "无线耳机", "平板电脑", "智能音箱"],
             "游戏": ["游戏机", "游戏周边", "游戏礼品卡", "游戏手柄"],
-            "音乐": ["音乐会门票", "蓝牙音箱", "音乐订阅服务", "乐器"],
+            "音乐": ["乐会门票", "蓝牙音箱", "音乐订阅服务", "乐器"],
             "美食": ["美食礼券", "烹饪工具", "精品茶具", "咖啡器具"],
             "运动": ["运动手环", "运动装备", "健身器材", "运动鞋"],
             "读书": ["电子书阅读器", "精装图书", "读书订阅", "书签"],
