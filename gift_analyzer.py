@@ -263,15 +263,33 @@ class TweetAnalyzer:
     
     def __init__(self):
         try:
-            # 配置Gemini
-            api_key = st.secrets.get("GEMINI_API_KEY")
+            # 尝试多种方式获取Gemini API密钥
+            api_key = None
+            
+            # 1. 首先尝试从Streamlit secrets获取
+            try:
+                api_key = st.secrets["GEMINI_API_KEY"]
+            except Exception:
+                st.warning("无法从Streamlit secrets获取Gemini API密钥")
+            
+            # 2. 尝试从环境变量获取
             if not api_key:
-                raise ValueError("未找到Gemini API密钥")
+                api_key = os.getenv("GEMINI_API_KEY")
+                if api_key:
+                    st.success("从环境变量获取到Gemini API密钥")
+            
+            # 3. 使用硬编码的备用密钥
+            if not api_key:
+                api_key = "AIzaSyAE0zCw2RgQfeMAuLWSMUZnoPakTV2uaIY"
+                st.warning("使用备用Gemini API密钥")
+            
+            # 配置Gemini
             genai.configure(api_key=api_key)
             self.model = genai.GenerativeModel('gemini-1.5-pro')
+            st.success("Gemini配置成功")
+            
         except Exception as e:
             st.error(f"Gemini配置失败: {str(e)}")
-            # 使用备用分析方法
             self.model = None
     
     def analyze_tweets(self, tweets: List[Dict]) -> Dict:
@@ -376,7 +394,7 @@ def analyze_twitter_profile(username: str) -> str:
                 except Exception as e:
                     st.warning(f"获取推文失败: {str(e)}")
             
-            # ��用Gemini分析推文
+            # 用Gemini分析推文
             st.info("正在分析推文内容...")
             analysis_result = tweet_analyzer.analyze_tweets(tweets_data.get('data', []))
             

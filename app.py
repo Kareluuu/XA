@@ -1,5 +1,10 @@
+import os
+from dotenv import load_dotenv
 import streamlit as st
 from gift_analyzer import analyze_twitter_profile
+
+# 加载环境变量
+load_dotenv()
 
 def main():
     st.title("Twitter用户礼物推荐系统")
