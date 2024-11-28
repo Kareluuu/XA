@@ -8,7 +8,11 @@ import json
 import hashlib
 from pathlib import Path
 import streamlit as st
-import google.generativeai as genai
+try:
+    import google.generativeai as genai
+except ImportError:
+    st.error("请安装 google-generativeai: pip install google-generativeai")
+    raise
 
 class TwitterCache:
     """Twitter 数据缓存系统"""
@@ -204,7 +208,7 @@ class TwitterAPIv2:
             return {"data": []}  # 出错时返回空数据
 
     def _check_rate_limit(self):
-        """检查并处理速率限制"""
+        """检��并处理速率限制"""
         current_time = datetime.now()
         
         # 如果超过时间窗口，重置限制
@@ -234,7 +238,7 @@ class TwitterAPIv2:
                     timeout=10
                 )
                 
-                # 检查响应状态
+                # 检���响应状态
                 if response.status_code == 200:
                     data = response.json()
                     if 'data' in data:
