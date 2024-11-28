@@ -20,7 +20,7 @@ class TwitterCache:
     def __init__(self, cache_dir: str = ".cache"):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(exist_ok=True)
-        self.cache_duration = timedelta(hours=24)  # 增加缓存时间到24小时
+        self.cache_duration = timedelta(hours=1)  # 缓存1小时
 
     def _get_cache_path(self, key: str) -> Path:
         """获取缓存文件路径"""
@@ -87,9 +87,9 @@ class TwitterAPIv2:
             "User-Agent": "v2UserLookupPython"
         }
         self.rate_limit = {
-            "remaining": 15,  # Free Plan 每15分钟允许15次请求
+            "remaining": 25,  # Free Plan每15分钟允许25次请求
             "reset_time": datetime.now() + timedelta(minutes=15),
-            "requests_per_window": 15,
+            "requests_per_window": 25,
             "window_size": 15
         }
         logging.basicConfig(level=logging.INFO)
@@ -176,34 +176,37 @@ class TwitterAPIv2:
                 return cached_data
             raise
 
-    def get_user_tweets(self, user_id: str, max_results: int = 10) -> Dict:
+    def get_user_tweets(self, user_id: str) -> Dict:
         """获取用户最近7天的推文"""
         try:
             endpoint = f"{self.API_BASE}/users/{user_id}/tweets"
             params = {
-                "max_results": max_results,  # 减少每次请求的数量
+                "max_results": 10,  # Free Plan限制
                 "tweet.fields": "created_at,text",
                 "exclude": "retweets,replies",
                 "start_time": (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
             }
             
-            # 尝试从缓存获取
             cache_key = f"tweets_{user_id}"
             if cached_data := self.cache.get(cache_key):
                 st.info("使用缓存的推文数据")
                 return cached_data
             
-            response = self._make_request(endpoint, params)
-            
-            # 缓存成功的响应
-            if response and 'data' in response:
-                self.cache.set(cache_key, response)
-            
-            return response
-            
+            try:
+                response = self._make_request(endpoint, params)
+                if response and 'data' in response:
+                    self.cache.set(cache_key, response)
+                return response
+            except Exception as e:
+                if "速率限制" in str(e):
+                    st.warning(str(e))
+                    if cached_data := self.cache.get(cache_key):
+                        return cached_data
+                raise
+                
         except Exception as e:
             st.warning(f"获取推文失败: {str(e)}")
-            return {"data": []}  # 返回空数据而不是失败
+            return {"data": []}
 
     def _check_rate_limit(self):
         """检并处理速率限制"""
@@ -215,7 +218,7 @@ class TwitterAPIv2:
             self.rate_limit["reset_time"] = current_time + timedelta(minutes=self.rate_limit["window_size"])
             
         # 如果剩余请求数不足，直接拒绝
-        if self.rate_limit["remaining"] <= 2:  # 保留2个请求额度作为缓冲
+        if self.rate_limit["remaining"] <= 2:  # 保留2个请��额度作为缓冲
             wait_time = (self.rate_limit["reset_time"] - current_time).total_seconds()
             if wait_time > 0:
                 minutes = int(wait_time / 60)
@@ -225,9 +228,24 @@ class TwitterAPIv2:
     def _make_request(self, endpoint: str, params: Dict) -> Dict:
         """发送API请求"""
         try:
+            # 检查缓存
+            cache_key = hashlib.md5(f"{endpoint}_{str(params)}".encode()).hexdigest()
+            if cached_data := self.cache.get(cache_key):
+                st.info("使用缓存数据")
+                return cached_data
+
             # 检查速率限制
-            self._check_rate_limit()
+            current_time = datetime.now()
+            if current_time >= self.rate_limit["reset_time"]:
+                self.rate_limit["remaining"] = self.rate_limit["requests_per_window"]
+                self.rate_limit["reset_time"] = current_time + timedelta(minutes=self.rate_limit["window_size"])
             
+            if self.rate_limit["remaining"] <= 0:
+                wait_time = (self.rate_limit["reset_time"] - current_time).total_seconds()
+                if wait_time > 0:
+                    raise Exception(f"达到API速率限制，请等待{int(wait_time/60)}分{int(wait_time%60)}秒")
+
+            # 发送请求
             response = requests.get(
                 endpoint,
                 headers=self.headers,
@@ -241,23 +259,22 @@ class TwitterAPIv2:
             if 'x-rate-limit-reset' in response.headers:
                 self.rate_limit["reset_time"] = datetime.fromtimestamp(int(response.headers['x-rate-limit-reset']))
             
-            if response.status_code == 429:
-                reset_time = self.rate_limit["reset_time"]
-                wait_time = (reset_time - datetime.now()).total_seconds()
-                minutes = int(wait_time / 60)
-                seconds = int(wait_time % 60)
-                raise Exception(f"达到API速率限制，请等待{minutes}分{seconds}秒")
-                
+            # 处理响应
             if response.status_code == 200:
-                return response.json()
+                data = response.json()
+                self.cache.set(cache_key, data)
+                return data
+            elif response.status_code == 429:  # Rate limit exceeded
+                reset_time = datetime.fromtimestamp(int(response.headers.get('x-rate-limit-reset', 0)))
+                wait_time = (reset_time - current_time).total_seconds()
+                raise Exception(f"达到API速率限制，请等待{int(wait_time/60)}分{int(wait_time%60)}秒")
             else:
                 raise Exception(f"API请求失败: {response.status_code}")
                 
         except Exception as e:
-            # 尝试从缓存获取数据
-            cache_key = endpoint.split('/')[-1]  # 使用最后一个路径段作为缓存键
+            st.error(f"API请求错误: {str(e)}")
             if cached_data := self.cache.get(cache_key):
-                st.warning("使用缓存数据")
+                st.warning("使用缓存数据作为备选")
                 return cached_data
             raise
 
@@ -405,7 +422,7 @@ def analyze_twitter_profile(username: str) -> str:
 # X用户推文分析报告
 
 ## 推文分析
-- 分析时间范围：最近7天
+- 分析时间范围：最近7���
 - 分析推文数量：{len(tweets_data.get('data', []))}条
 
 ### 主要话题
