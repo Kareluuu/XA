@@ -81,10 +81,10 @@ class TwitterAPIv2:
             "Content-Type": "application/json"
         }
         self.rate_limit = {
-            "remaining": 15,  # Free plan每15分钟15次请求
-            "reset_time": datetime.now() + timedelta(minutes=15),
-            "requests_per_window": 15,  # 每15分钟允许的请求数
-            "window_size": 15  # 时间窗口（分钟）
+            "remaining": 3,  # 从5降到3
+            "reset_time": datetime.now() + timedelta(minutes=30),  # 从15分钟改为30分钟
+            "requests_per_window": 3,  # 从5降到3
+            "window_size": 30  # 从15分钟改为30分钟
         }
         logging.basicConfig(level=logging.INFO)
         self.logger = logging.getLogger(__name__)
@@ -318,12 +318,13 @@ def analyze_twitter_profile(username: str) -> str:
     try:
         api = TwitterAPIv2()
         
-        # 检查是否有缓存数据
+        # 强制优先使用缓存
         cache_key = f"user_{username}"
         user_data = api.cache.get(cache_key)
         
         if user_data:
             st.success("✅ 使用缓存数据进行分析")
+            # 如果有缓存数据，直接使用缓存中的推文数据
             user_info = user_data['data']
             user_id = user_info['id']
             metrics = user_info.get('public_metrics', {})
