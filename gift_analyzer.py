@@ -208,7 +208,7 @@ class TwitterAPIv2:
             return {"data": []}  # 出错时返回空数据
 
     def _check_rate_limit(self):
-        """检��并处理速率限制"""
+        """检并处理速率限制"""
         current_time = datetime.now()
         
         # 如果超过时间窗口，重置限制
@@ -238,7 +238,7 @@ class TwitterAPIv2:
                     timeout=10
                 )
                 
-                # 检���响应状态
+                # 检响应状态
                 if response.status_code == 200:
                     data = response.json()
                     if 'data' in data:
@@ -262,12 +262,20 @@ class TweetAnalyzer:
     """使用Gemini进行推文分析"""
     
     def __init__(self):
-        # 配置Gemini
-        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-        self.model = genai.GenerativeModel('gemini-1.5-pro')
+        try:
+            # 配置Gemini
+            api_key = st.secrets.get("GEMINI_API_KEY")
+            if not api_key:
+                raise ValueError("未找到Gemini API密钥")
+            genai.configure(api_key=api_key)
+            self.model = genai.GenerativeModel('gemini-1.5-pro')
+        except Exception as e:
+            st.error(f"Gemini配置失败: {str(e)}")
+            # 使用备用分析方法
+            self.model = None
     
     def analyze_tweets(self, tweets: List[Dict]) -> Dict:
-        """使用Gemini分析推文"""
+        """分析推文"""
         if not tweets:
             return {
                 "topics": [],
@@ -276,6 +284,10 @@ class TweetAnalyzer:
                 "gift_suggestions": ["通用礼品卡", "精美礼品盒", "手工巧克力"]
             }
         
+        # 如果Gemini不可用，使用备用分析方法
+        if not self.model:
+            return self._fallback_analysis(tweets)
+            
         # 准备推文文本
         tweet_texts = [tweet.get('text', '') for tweet in tweets]
         prompt = f"""
@@ -297,13 +309,39 @@ class TweetAnalyzer:
             result = json.loads(response.text)
             return result
         except Exception as e:
-            st.error(f"Gemini分析失败: {str(e)}")
-            return {
-                "topics": [],
-                "keywords": [],
-                "analysis": "分析过程出现错误",
-                "gift_suggestions": ["通用礼品卡"]
-            }
+            st.warning(f"Gemini分析失败，使用备用分析方法: {str(e)}")
+            return self._fallback_analysis(tweets)
+            
+    def _fallback_analysis(self, tweets: List[Dict]) -> Dict:
+        """备用分析方法"""
+        # 简单的文本分析
+        topics = set()
+        keywords = {}
+        
+        for tweet in tweets:
+            text = tweet.get('text', '').lower()
+            words = text.split()
+            
+            # 统计关键词
+            for word in words:
+                if len(word) > 3:  # 只统计长度大于3的词
+                    keywords[word] = keywords.get(word, 0) + 1
+        
+        # 获取最常见的关键词
+        top_keywords = sorted(keywords.items(), key=lambda x: x[1], reverse=True)[:5]
+        
+        return {
+            "topics": list(topics)[:3],
+            "keywords": [word for word, _ in top_keywords],
+            "analysis": "使用基础文本分析方法",
+            "gift_suggestions": [
+                "通用礼品卡",
+                "精美礼品盒",
+                "数码产品",
+                "书籍",
+                "手工艺品"
+            ]
+        }
 
 def analyze_twitter_profile(username: str) -> str:
     """主分析函数"""
@@ -338,7 +376,7 @@ def analyze_twitter_profile(username: str) -> str:
                 except Exception as e:
                     st.warning(f"获取推文失败: {str(e)}")
             
-            # 使用Gemini分析推文
+            # ��用Gemini分析推文
             st.info("正在分析推文内容...")
             analysis_result = tweet_analyzer.analyze_tweets(tweets_data.get('data', []))
             
