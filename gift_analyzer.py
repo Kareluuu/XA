@@ -88,6 +88,50 @@ class TwitterAPIv2:
         }
         logging.basicConfig(level=logging.INFO)
         self.logger = logging.getLogger(__name__)
+        
+        # API调用统计
+        self.api_stats = {
+            "window_start": datetime.now(),
+            "calls_in_window": 0,
+            "total_calls": 0
+        }
+        
+        # 启动统计打印定时器
+        self._start_stats_timer()
+
+    def _start_stats_timer(self):
+        """每15分钟打印一次API调用统计"""
+        def print_stats():
+            while True:
+                time.sleep(900)  # 15分钟
+                self._print_api_stats()
+                # 重置窗口计数
+                self.api_stats["window_start"] = datetime.now()
+                self.api_stats["calls_in_window"] = 0
+        
+        # 在后台线程中运行统计
+        import threading
+        stats_thread = threading.Thread(target=print_stats, daemon=True)
+        stats_thread.start()
+    
+    def _print_api_stats(self):
+        """打印API调用统计信息"""
+        current_time = datetime.now()
+        window_duration = (current_time - self.api_stats["window_start"]).total_seconds() / 60
+        
+        stats_message = f"""
+# 📊 API调用统计 ({current_time.strftime('%Y-%m-%d %H:%M:%S')})
+
+## 当前15分钟窗口
+- API调用次数: {self.api_stats["calls_in_window"]}
+- 剩余可用次数: {self.rate_limit["remaining"]}
+- 平均调用频率: {self.api_stats["calls_in_window"] / window_duration:.2f} 次/分钟
+
+## 累计统计
+- 总调用次数: {self.api_stats["total_calls"]}
+- 每月限额剩余: {self.rate_limit["monthly_limit"] - self.rate_limit["monthly_used"]}
+"""
+        st.info(stats_message)
 
     def _get_bearer_token(self) -> str:
         """获取OAuth 2.0 Bearer Token"""
@@ -211,9 +255,17 @@ class TwitterAPIv2:
                 timeout=10
             )
             
+            # 更新API调用统计
+            self.api_stats["calls_in_window"] += 1
+            self.api_stats["total_calls"] += 1
+            
+            # 更新速率限制信息
             if response.status_code == 200:
-                # 成功后减少剩余请求数
-                self.rate_limit["remaining"] -= 1
+                self.rate_limit["remaining"] = int(response.headers.get("x-rate-limit-remaining", self.rate_limit["remaining"]))
+                reset_time = response.headers.get("x-rate-limit-reset")
+                if reset_time:
+                    self.rate_limit["reset_time"] = datetime.fromtimestamp(int(reset_time))
+                self.rate_limit["monthly_used"] += 1
                 return response.json()
             elif response.status_code == 429:  # Rate limit exceeded
                 reset_time = response.headers.get("x-rate-limit-reset")
