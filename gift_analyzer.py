@@ -82,9 +82,9 @@ class TwitterAPIv2:
             "User-Agent": "v2UserLookupPython"
         }
         self.rate_limit = {
-            "remaining": 10,  # Free Plan每15分钟允许10次请求
+            "remaining": 25,  # Free Plan每15分钟允许25次请求
             "reset_time": datetime.now() + timedelta(minutes=15),
-            "requests_per_window": 10,  # Free Plan限制
+            "requests_per_window": 25,  # Free Plan限制
             "window_size": 15  # 时间窗口（分钟）
         }
         logging.basicConfig(level=logging.INFO)
@@ -124,23 +124,34 @@ class TwitterAPIv2:
 
     def get_user_by_username(self, username: str) -> Dict:
         """获取用户信息"""
-        cache_key = f"user_{username}"
-        
-        # 尝试获取缓存
-        cached_data = self.cache.get(cache_key)
-        if cached_data and 'data' in cached_data:
-            return cached_data
-            
-        # 如果没有缓存，发起API请求
         try:
-            response_data = self._make_request(...)
-            if response_data and 'data' in response_data:
-                self.cache.set(cache_key, response_data)
-                return response_data
+            self._check_rate_limit()
+            
+            # 修正：添加具体的endpoint和参数
+            endpoint = f"{self.API_BASE}/users/by/username/{username}"
+            params = {
+                "user.fields": "id,name,username,description,public_metrics,verified,location"
+            }
+            
+            response = requests.get(
+                endpoint,
+                headers=self.headers,
+                params=params,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                return response.json()
+            elif response.status_code == 404:
+                raise Exception("用户不存在")
+            elif response.status_code == 401:
+                raise Exception("认证失败，请检查Token")
             else:
-                raise Exception("无效的API响应")
+                raise Exception(f"API请求失败: {response.status_code}")
+                
         except Exception as e:
-            raise Exception(f"获取用户信息失败: {str(e)}")
+            self.logger.error(f"获取用户信息失败: {str(e)}")
+            raise
 
     def get_user_tweets(self, user_id: str, max_results: int = 10) -> Dict:
         """获取用户最近7天的推文"""
@@ -149,29 +160,29 @@ class TwitterAPIv2:
             
             endpoint = f"{self.API_BASE}/users/{user_id}/tweets"
             params = {
-                "max_results": max_results,  # Free Plan限制每页10条
-                "tweet.fields": "created_at,text,public_metrics,author_id",
+                "max_results": max_results,
+                "tweet.fields": "created_at,text",  # 简化请求字段
                 "exclude": "retweets,replies",
-                # 严格按照Twitter API要求的时间格式
                 "start_time": (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
             }
             
             response = requests.get(
                 endpoint,
                 headers=self.headers,
-                params=params
+                params=params,
+                timeout=10
             )
             
             if response.status_code == 200:
                 return response.json()
             elif response.status_code == 404:
-                raise Exception("找不到用户推文")
+                return {"data": []}  # 返回空数据而不是抛出异常
             else:
                 raise Exception(f"获取推文失败: {response.status_code}")
                 
         except Exception as e:
             self.logger.error(f"获取推文失败: {str(e)}")
-            raise
+            return {"data": []}  # 出错时返回空数据
 
     def _check_rate_limit(self):
         """检查并处理速率限制"""
@@ -191,7 +202,7 @@ class TwitterAPIv2:
                 raise Exception(f"达到速率限制，请等待{minutes}分{seconds}秒")
 
     def _make_request(self, endpoint: str, params: Dict) -> Dict:
-        """发送API请求"""
+        """发API请求"""
         max_retries = 3
         retry_delay = 2
         
@@ -317,80 +328,33 @@ def analyze_twitter_profile(username: str) -> str:
         
         # 验证用户名
         if not username or not username.strip():
-            return """
-# ⚠️ 无效的用户名
-
-请输入有效的Twitter用户名（不需要包含@符号）
-"""
+            return "# ⚠️ 无效的用户名\n\n请输入有效的Twitter用户名（不需要包含@符号）"
         
+        # 移除@符号如果存在
+        username = username.strip().lstrip('@')
+        
+        # 获取用户数据
         try:
             user_data = api.get_user_by_username(username)
-            if not user_data or 'data' not in user_data:
-                return """
-# ❌ 未找到用户
-
-请确保：
-1. 用户名拼写正确
-2. 该用户确实存在
-3. 账号未被停用或删除
-"""
         except Exception as e:
             if "用户不存在" in str(e):
-                return """
-# ❌ 用户不存在
-
-请确保：
-1. 输入的用户名拼写正确
-2. 该用户确实存在
-3. 用户名前不要带@符号
-"""
-            elif "API请求失败: 401" in str(e):
-                return """
-# ❌ 认证失败
-
-API认证失败，请检查：
-1. Bearer Token是否正确
-2. Token是否过期
-3. 是否有正确的API访问权限
-"""
-            else:
-                raise
-        
-        # 强制优先使用缓存
-        cache_key = f"user_{username}"
-        user_data = api.cache.get(cache_key)
-        
-        if not user_data:
-            # Free Plan每15分钟只能调用一次API
-            if api.rate_limit["remaining"] < 1:
-                wait_time = (api.rate_limit["reset_time"] - datetime.now()).total_seconds()
-                minutes = int(wait_time / 60)
-                seconds = int(wait_time % 60)
-                return f"""
-# ⏳ API访问频率限制（Free Plan）
-
-当前状态：已达到API访问限制
-预计恢复时间：{minutes}分{seconds}秒后
-
-说明：
-- Free Plan每15分钟只允许1次API调用
-- 建议升级到Basic Plan以获得更多访问权限
-
-建议操作：
-1. 等待 {minutes}分{seconds}秒后再试
-2. 尝试查询其他已缓存的用户
-"""
+                return "# ❌ 用户不存在\n\n该用户名不存在，请检查拼写是否正确"
+            raise
             
-            user_info = user_data['data']
-            user_id = user_info['id']
-            metrics = user_info.get('public_metrics', {})
+        if not user_data or 'data' not in user_data:
+            return "# ❌ 无效的用户数据\n\n无法获取用户信息，请稍后重试"
             
-            # 只在有足够配额时获取推文
+        user_info = user_data['data']
+        user_id = user_info['id']
+        metrics = user_info.get('public_metrics', {})
+        
+        # 获取用户推文
+        tweets_data = {"data": []}  # 默认空数据
+        try:
             if api.rate_limit["remaining"] > 1:
                 tweets_data = api.get_user_tweets(user_id)
-            else:
-                tweets_data = {"data": []}
-                st.warning("⚠️ 为节省API配额，不获取推文数据")
+        except Exception as e:
+            st.warning(f"获取推文失败: {str(e)}")
         
         # 分析推文
         analyzer = GiftAnalyzer()
@@ -399,7 +363,7 @@ API认证失败，请检查：
         
         # 格式化输出
         return f"""
-# Twitter 用户分析报告 {'(缓存数据)' if api.cache.get(cache_key) else ''}
+# Twitter 用户分析报告
 
 ## 基本信息
 - 用户名: @{username}
