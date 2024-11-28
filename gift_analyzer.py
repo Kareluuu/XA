@@ -78,7 +78,8 @@ class TwitterAPIv2:
         self.cache = TwitterCache()
         self.headers = {
             "Authorization": f"Bearer {self.BEARER_TOKEN}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "User-Agent": "v2UserLookupPython"
         }
         self.rate_limit = {
             "remaining": 1,  # Free Plan每15分钟只允许1次请求
@@ -123,65 +124,60 @@ class TwitterAPIv2:
 
     def get_user_by_username(self, username: str) -> Dict:
         """获取用户信息（带缓存）"""
-        cache_key = f"user_{username}"
-        cached_data = self.cache.get(cache_key)
-        
-        if cached_data:
-            self.logger.info(f"使用缓存数据: {username}")
-            return cached_data
-            
-        # 如果没有缓存且接近限制，直接拒绝
-        if self.rate_limit["remaining"] <= 2:  # 为推文请求保留额度
-            raise Exception("达到速率限制")
-            
         try:
             self._check_rate_limit()
             
             endpoint = f"{self.API_BASE}/users/by/username/{username}"
             params = {
-                "user.fields": "created_at,description,location,public_metrics,verified"
+                "user.fields": "description,created_at,location,public_metrics,verified,profile_image_url"
             }
             
-            self.logger.info(f"请求用户信息: {username}")
-            response_data = self._make_request(endpoint, params)
+            response = requests.get(
+                endpoint,
+                headers=self.headers,
+                params=params
+            )
             
-            # 缓存结果
-            self.cache.set(cache_key, response_data)
-            return response_data
-            
+            if response.status_code == 200:
+                return response.json()
+            elif response.status_code == 404:
+                raise Exception("用户不存在")
+            else:
+                raise Exception(f"API请求失败: {response.status_code}")
+                
         except Exception as e:
             self.logger.error(f"获取用户信息失败: {str(e)}")
             raise
 
     def get_user_tweets(self, user_id: str, max_results: int = 10) -> Dict:
         """获取用户最近7天的推文"""
-        cache_key = f"tweets_{user_id}"
-        cached_data = self.cache.get(cache_key)
-        
-        if cached_data:
-            self.logger.info(f"使用缓存的推文数据: {user_id}")
-            return cached_data
-            
         try:
             self._check_rate_limit()
             
             endpoint = f"{self.API_BASE}/users/{user_id}/tweets"
             params = {
                 "max_results": max_results,
-                "tweet.fields": "created_at,text",
+                "tweet.fields": "created_at,text,public_metrics",
+                "expansions": "author_id",
                 "exclude": "retweets,replies",
-                "start_time": (datetime.now() - timedelta(days=7)).isoformat() + "Z"
+                "start_time": (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
             }
             
-            self.logger.info(f"请求用户推文: {user_id}")
-            response_data = self._make_request(endpoint, params)
+            response = requests.get(
+                endpoint,
+                headers=self.headers,
+                params=params
+            )
             
-            # 缓存结果
-            self.cache.set(cache_key, response_data)
-            return response_data
-            
+            if response.status_code == 200:
+                return response.json()
+            elif response.status_code == 404:
+                raise Exception("找不到用户推文")
+            else:
+                raise Exception(f"获取推文失败: {response.status_code}")
+                
         except Exception as e:
-            self.logger.error(f"获取用户推文失败: {str(e)}")
+            self.logger.error(f"获取推文失败: {str(e)}")
             raise
 
     def _check_rate_limit(self):
@@ -201,32 +197,38 @@ class TwitterAPIv2:
 
     def _make_request(self, endpoint: str, params: Dict) -> Dict:
         """发送API请求"""
-        try:
-            # 先检查速率限制
-            self._check_rate_limit()
-            
-            response = requests.get(
-                endpoint,
-                headers=self.headers,
-                params=params,
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                # 成功后减少剩余请求数
-                self.rate_limit["remaining"] -= 1
-                return response.json()
-            elif response.status_code == 429:  # Rate limit exceeded
-                reset_time = response.headers.get("x-rate-limit-reset")
-                if reset_time:
-                    self.rate_limit["reset_time"] = datetime.fromtimestamp(int(reset_time))
-                self.rate_limit["remaining"] = 0
-                raise Exception("达到速率限制")
-            else:
-                raise Exception(f"API请求失败: {response.status_code}")
+        max_retries = 3
+        retry_delay = 2
+        
+        for attempt in range(max_retries):
+            try:
+                response = requests.get(
+                    endpoint,
+                    headers=self.headers,
+                    params=params,
+                    timeout=10
+                )
                 
-        except requests.exceptions.RequestException as e:
-            raise Exception(f"网络请求失败: {str(e)}")
+                if response.status_code == 200:
+                    return response.json()
+                elif response.status_code == 429:  # Rate limit
+                    reset_time = response.headers.get("x-rate-limit-reset")
+                    raise Exception("达到速率限制")
+                elif response.status_code == 401:
+                    raise Exception("认证失败")
+                elif response.status_code == 404:
+                    raise Exception("资源不存在")
+                else:
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                        continue
+                    raise Exception(f"API请求失败: {response.status_code}")
+                    
+            except requests.exceptions.RequestException as e:
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    continue
+                raise Exception(f"网络请求失败: {str(e)}")
 
 class GiftAnalyzer:
     """礼物分"""
@@ -319,6 +321,30 @@ def analyze_twitter_profile(username: str) -> str:
     try:
         api = TwitterAPIv2()
         
+        try:
+            user_data = api.get_user_by_username(username)
+        except Exception as e:
+            if "用户不存在" in str(e):
+                return """
+# ❌ 用户不存在
+
+请确保：
+1. 输入的用户名拼写正确
+2. 该用户确实存在
+3. 用户名前不要带@符号
+"""
+            elif "API请求失败: 401" in str(e):
+                return """
+# ❌ 认证失败
+
+API认证失败，请检查：
+1. Bearer Token是否正确
+2. Token是否过期
+3. 是否有正确的API访问权限
+"""
+            else:
+                raise
+        
         # 强制优先使用缓存
         cache_key = f"user_{username}"
         user_data = api.cache.get(cache_key)
@@ -344,7 +370,6 @@ def analyze_twitter_profile(username: str) -> str:
 2. 尝试查询其他已缓存的用户
 """
             
-            user_data = api.get_user_by_username(username)
             user_info = user_data['data']
             user_id = user_info['id']
             metrics = user_info.get('public_metrics', {})
