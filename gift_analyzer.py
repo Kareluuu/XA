@@ -91,50 +91,64 @@ class TwitterAPIv2:
 
     def _get_bearer_token(self) -> str:
         """获取OAuth 2.0 Bearer Token"""
-        token = "AAAAAAAAAAAAAAAAAAAAANnAxAEAAAAAZPAUnhptfF8XZOqZ4ZSoPgm4PEc%3DQQO7FmG2IjsivpHOORNHIOx9Oyfl7kskEluZWK8OHqTr5Wa9VY"
+        # 使用新的Bearer Token
+        return "AAAAAAAAAAAAAAAAAAAAANnAxAEAAAAAZPAUnhptfF8XZOqZ4ZSoPgm4PEc%3DQQO7FmG2IjsivpHOORNHIOx9Oyfl7kskEluZWK8OHqTr5Wa9VY"
         
-        # 验证token是否有效
-        test_endpoint = f"{self.API_BASE}/users/by/username/twitter"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json"
+        # 以下是OAuth 2.0的方式，暂时注释掉
+        """
+        if token := os.getenv('TWITTER_BEARER_TOKEN'):
+            return token
+            
+        auth_url = "https://api.twitter.com/oauth2/token"
+        auth_data = {
+            'grant_type': 'client_credentials'
+        }
+        auth_headers = {
+            'Content-Type': 'application/x-www-form-urlencoded'
         }
         
-        try:
-            response = requests.get(test_endpoint, headers=headers)
-            if response.status_code == 200:
-                return token
-            else:
-                raise Exception("Bearer Token 验证失败")
-        except Exception as e:
-            self.logger.error(f"Token验证失败: {str(e)}")
-            raise
+        # 使用Basic认证
+        response = requests.post(
+            auth_url,
+            auth=(self.CLIENT_ID, self.CLIENT_SECRET),
+            data=auth_data,
+            headers=auth_headers
+        )
+        
+        if response.status_code == 200:
+            return response.json()['access_token']
+        else:
+            raise ValueError(f"获取Bearer Token失: {response.text}")
+        """
 
     def get_user_by_username(self, username: str) -> Dict:
         """获取用户信息（带缓存）"""
+        cache_key = f"user_{username}"
+        cached_data = self.cache.get(cache_key)
+        
+        if cached_data:
+            self.logger.info(f"使用缓存数据: {username}")
+            return cached_data
+            
+        # 如果没有缓存且接近限制，直接拒绝
+        if self.rate_limit["remaining"] <= 2:  # 为推文请求保留额度
+            raise Exception("达到速率限制")
+            
         try:
+            self._check_rate_limit()
+            
             endpoint = f"{self.API_BASE}/users/by/username/{username}"
             params = {
                 "user.fields": "created_at,description,location,public_metrics,verified"
             }
             
             self.logger.info(f"请求用户信息: {username}")
-            response = requests.get(
-                endpoint,
-                headers=self.headers,
-                params=params,
-                timeout=10
-            )
+            response_data = self._make_request(endpoint, params)
             
-            if response.status_code == 200:
-                return response.json()
-            elif response.status_code == 404:
-                raise Exception(f"未找到用户: {username}")
-            elif response.status_code == 401:
-                raise Exception("认证失败，请检查API凭据")
-            else:
-                raise Exception(f"API请求失败: {response.status_code}")
-                
+            # 缓存结果
+            self.cache.set(cache_key, response_data)
+            return response_data
+            
         except Exception as e:
             self.logger.error(f"获取用户信息失败: {str(e)}")
             raise
@@ -232,7 +246,7 @@ class GiftAnalyzer:
         
         # 情感词典
         self.sentiment_words = {
-            "positive": ["喜欢", "爱", "好", "棒", "赞", "享受", "期待", "感恩"],
+            "positive": ["喜欢", "爱", "好", "棒", "赞", "���受", "期待", "感恩"],
             "negative": ["讨厌", "烦", "差", "糟", "失望", "难过", "生气"]
         }
 
@@ -297,7 +311,7 @@ class GiftAnalyzer:
         for category, _ in sorted_interests[:3]:
             recommendations.extend(self.interest_gift_mapping[category][:2])
         
-        return recommendations[:5]  # 返回前5个推荐
+        return recommendations[:5]  # 返回前5个推���
 
 def analyze_twitter_profile(username: str) -> str:
     """主分析函数（带缓存）"""
@@ -318,7 +332,7 @@ def analyze_twitter_profile(username: str) -> str:
                 return f"""
 # ⏳ API访问频率限制（Free Plan）
 
-当前状态：已达API访问限制
+当前状态：已达到API访问限制
 预计恢复时间：{minutes}分{seconds}秒后
 
 说明：
@@ -331,24 +345,16 @@ def analyze_twitter_profile(username: str) -> str:
 """
             
             user_data = api.get_user_by_username(username)
+            user_info = user_data['data']
+            user_id = user_info['id']
+            metrics = user_info.get('public_metrics', {})
             
-        # 获取用户信息
-        if 'data' not in user_data:
-            return "未找到用户数据"
-            
-        user_info = user_data['data']
-        user_id = user_info['id']
-        metrics = user_info.get('public_metrics', {})
-        
-        # 初始化tweets_data
-        tweets_data = {"data": []}
-        
-        # 获取推文数据
-        if api.rate_limit["remaining"] > 1:
-            try:
+            # 只在有足够配额时获取推文
+            if api.rate_limit["remaining"] > 1:
                 tweets_data = api.get_user_tweets(user_id)
-            except Exception as e:
-                st.warning(f"获取推文失败: {str(e)}")
+            else:
+                tweets_data = {"data": []}
+                st.warning("⚠️ 为节省API配额，暂不获取推文数据")
         
         # 分析推文
         analyzer = GiftAnalyzer()
@@ -380,7 +386,7 @@ def analyze_twitter_profile(username: str) -> str:
 {_format_recommendations(gift_recommendations)}
 
 ## 账号描述
-{user_info.get('description', '无描���')}
+{user_info.get('description', '无描述')}
 """
 
     except Exception as e:
@@ -425,7 +431,7 @@ def _interpret_sentiment(score: float) -> str:
     if score > 0.5:
         return "非常积极"
     elif score > 0:
-        return "较��积极"
+        return "较为积极"
     elif score == 0:
         return "中性"
     elif score > -0.5:
