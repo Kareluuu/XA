@@ -127,30 +127,48 @@ class TwitterAPIv2:
         try:
             self._check_rate_limit()
             
-            # 修正：添加具体的endpoint和参数
+            # 修正：添加具体的endpoint和参数，按照X API文档要求
             endpoint = f"{self.API_BASE}/users/by/username/{username}"
             params = {
-                "user.fields": "id,name,username,description,public_metrics,verified,location"
+                "user.fields": "id,name,username,description,public_metrics,verified,location,created_at",
+                "expansions": "pinned_tweet_id"
             }
             
-            response = requests.get(
-                endpoint,
-                headers=self.headers,
-                params=params,
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                return response.json()
-            elif response.status_code == 404:
-                raise Exception("用户不存在")
-            elif response.status_code == 401:
-                raise Exception("认证失败，请检查Token")
-            else:
-                raise Exception(f"API请求失败: {response.status_code}")
-                
+            # 添加错误处理和重试逻辑
+            for attempt in range(3):
+                try:
+                    response = requests.get(
+                        endpoint,
+                        headers=self.headers,
+                        params=params,
+                        timeout=10
+                    )
+                    
+                    # 记录响应内容用于调试
+                    self.logger.info(f"API Response: {response.status_code}, {response.text}")
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        # 缓存成功的响应
+                        self.cache.set(f"user_{username}", data)
+                        return data
+                    elif response.status_code == 404:
+                        raise Exception("用户不存在")
+                    elif response.status_code == 401:
+                        raise Exception("认证失败，请检查Token")
+                    else:
+                        raise Exception(f"API请求失败: {response.status_code}")
+                        
+                except requests.exceptions.RequestException as e:
+                    if attempt == 2:  # 最后一次尝试
+                        raise Exception(f"网络请求失败: {str(e)}")
+                    time.sleep(2)  # 重试前等待
+                    
         except Exception as e:
             self.logger.error(f"获取用户信息失败: {str(e)}")
+            # 尝试从缓存获取
+            if cached_data := self.cache.get(f"user_{username}"):
+                return cached_data
             raise
 
     def get_user_tweets(self, user_id: str, max_results: int = 10) -> Dict:
@@ -321,7 +339,7 @@ class GiftAnalyzer:
         return recommendations[:5]  # 返回前5个推荐
 
 def analyze_twitter_profile(username: str) -> str:
-    """主分析函数（带缓存）"""
+    """主分析函数"""
     api = None
     try:
         api = TwitterAPIv2()
@@ -333,36 +351,37 @@ def analyze_twitter_profile(username: str) -> str:
         # 移除@符号如果存在
         username = username.strip().lstrip('@')
         
-        # 获取用户数据
         try:
+            # 添加日志
+            st.info("正在获取用户信息...")
+            
             user_data = api.get_user_by_username(username)
-        except Exception as e:
-            if "用户不存在" in str(e):
-                return "# ❌ 用户不存在\n\n该用户名不存在，请检查拼写是否正确"
-            raise
             
-        if not user_data or 'data' not in user_data:
-            return "# ❌ 无效的用户数据\n\n无法获取用户信息，请稍后重试"
+            if not user_data or 'data' not in user_data:
+                st.error(f"API返回数据: {user_data}")  # 调试信息
+                return "# ❌ 无效的用户数据\n\n无法获取用户信息，请稍后重试"
+                
+            user_info = user_data['data']
+            user_id = user_info['id']
+            metrics = user_info.get('public_metrics', {})
             
-        user_info = user_data['data']
-        user_id = user_info['id']
-        metrics = user_info.get('public_metrics', {})
-        
-        # 获取用户推文
-        tweets_data = {"data": []}  # 默认空数据
-        try:
+            # 获取用户推文
+            st.info("正在获取用户推文...")
+            tweets_data = {"data": []}  # 默认空数据
+            
             if api.rate_limit["remaining"] > 1:
-                tweets_data = api.get_user_tweets(user_id)
-        except Exception as e:
-            st.warning(f"获取推文失败: {str(e)}")
-        
-        # 分析推文
-        analyzer = GiftAnalyzer()
-        analysis_result = analyzer.analyze_tweets(tweets_data)
-        gift_recommendations = analyzer.recommend_gifts(analysis_result)
-        
-        # 格式化输出
-        return f"""
+                try:
+                    tweets_data = api.get_user_tweets(user_id)
+                except Exception as e:
+                    st.warning(f"获取推文失败: {str(e)}")
+                    # 继续执行，使用空的推文数据
+            
+            # 分析推文
+            analyzer = GiftAnalyzer()
+            analysis_result = analyzer.analyze_tweets(tweets_data)
+            gift_recommendations = analyzer.recommend_gifts(analysis_result)
+            
+            return f"""
 # Twitter 用户分析报告
 
 ## 基本信息
@@ -388,29 +407,23 @@ def analyze_twitter_profile(username: str) -> str:
 ## 账号描述
 {user_info.get('description', '无描述')}
 """
-
+            
+        except Exception as e:
+            st.error(f"错误详情: {str(e)}")  # 显示具体错误信息
+            if "用户不存在" in str(e):
+                return "# ❌ 用户不存在\n\n该用户名不存在，请检查拼写是否正确"
+            elif "认证失败" in str(e):
+                return "# ❌ 认证失败\n\n请检查API Token是否有效"
+            raise
+            
     except Exception as e:
-        if "达到速率限制" in str(e):
-            if api and hasattr(api, 'rate_limit'):
-                wait_time = (api.rate_limit["reset_time"] - datetime.now()).total_seconds()
-                minutes = int(wait_time / 60)
-                seconds = int(wait_time % 60)
-                return f"""
-# ⏳ API访问频率限制
-
-当前状态：已达到API访问限制
-预计恢复时间：{minutes}分{seconds}秒后
-
-建议操作：
-1. 稍后再试
-2. 尝试分析其他用户
-3. 等待 {minutes}分{seconds}秒 后刷新
-"""
-        
-        return """
+        st.error(f"发生错误: {str(e)}")  # 显示错误详情
+        return f"""
 # ❌ 分析失败
 
-抱歉无法完成分析。请确保：
+错误信息: {str(e)}
+
+请确保：
 1. 输入的用户名正确
 2. 该用户存在且未被限制访问
 3. 网络连接正常
