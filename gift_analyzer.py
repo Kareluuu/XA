@@ -124,33 +124,23 @@ class TwitterAPIv2:
 
     def get_user_by_username(self, username: str) -> Dict:
         """获取用户信息"""
+        cache_key = f"user_{username}"
+        
+        # 尝试获取缓存
+        cached_data = self.cache.get(cache_key)
+        if cached_data and 'data' in cached_data:
+            return cached_data
+            
+        # 如果没有缓存，发起API请求
         try:
-            self._check_rate_limit()
-            
-            endpoint = f"{self.API_BASE}/users/by/username/{username}"
-            params = {
-                "user.fields": "id,name,username,created_at,description,public_metrics,verified,location"
-            }
-            
-            response = requests.get(
-                endpoint,
-                headers=self.headers,
-                params=params,
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                return response.json()
-            elif response.status_code == 404:
-                raise Exception("用户不存在")
-            elif response.status_code == 401:
-                raise Exception("认证失败，请检查Bearer Token")
+            response_data = self._make_request(...)
+            if response_data and 'data' in response_data:
+                self.cache.set(cache_key, response_data)
+                return response_data
             else:
-                raise Exception(f"API请求失败: {response.status_code}")
-                
+                raise Exception("无效的API响应")
         except Exception as e:
-            self.logger.error(f"获取用户信息失败: {str(e)}")
-            raise
+            raise Exception(f"获取用户信息失败: {str(e)}")
 
     def get_user_tweets(self, user_id: str, max_results: int = 10) -> Dict:
         """获取用户最近7天的推文"""
@@ -214,22 +204,17 @@ class TwitterAPIv2:
                     timeout=10
                 )
                 
-                # 更新速率限制信息
-                remaining = response.headers.get('x-rate-limit-remaining')
-                if remaining is not None:
-                    self.rate_limit["remaining"] = int(remaining)
-                
-                reset = response.headers.get('x-rate-limit-reset')
-                if reset is not None:
-                    self.rate_limit["reset_time"] = datetime.fromtimestamp(int(reset))
-                
+                # 检查响应状态
                 if response.status_code == 200:
-                    return response.json()
-                elif response.status_code == 429:
-                    if attempt < max_retries - 1:
-                        time.sleep(retry_delay * (attempt + 1))
-                        continue
-                    raise Exception("达到速率限制")
+                    data = response.json()
+                    if 'data' in data:
+                        return data
+                    else:
+                        raise Exception("API返回数据格式错误")
+                elif response.status_code == 404:
+                    raise Exception("用户不存在")
+                elif response.status_code == 401:
+                    raise Exception("认证失败，请检查Token")
                 else:
                     raise Exception(f"API请求失败: {response.status_code}")
                     
@@ -330,8 +315,25 @@ def analyze_twitter_profile(username: str) -> str:
     try:
         api = TwitterAPIv2()
         
+        # 验证用户名
+        if not username or not username.strip():
+            return """
+# ⚠️ 无效的用户名
+
+请输入有效的Twitter用户名（不需要包含@符号）
+"""
+        
         try:
             user_data = api.get_user_by_username(username)
+            if not user_data or 'data' not in user_data:
+                return """
+# ❌ 未找到用户
+
+请确保：
+1. 用户名拼写正确
+2. 该用户确实存在
+3. 账号未被停用或删除
+"""
         except Exception as e:
             if "用户不存在" in str(e):
                 return """
