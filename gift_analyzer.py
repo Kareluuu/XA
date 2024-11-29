@@ -130,100 +130,102 @@ class TwitterAPIv2:
     def get_user_by_username(self, username: str) -> Dict:
         """获取用户信息"""
         try:
+            # 先检查缓存
+            cache_key = f"user_{username}"
+            if cached_data := self.cache.get(cache_key):
+                st.info("使用缓存的用户数据")
+                return cached_data
+            
+            # 检查速率限制
             self._check_rate_limit()
             
-            # 修正：添加具体的endpoint和参数，按照X API文档要求
             endpoint = f"{self.API_BASE}/users/by/username/{username}"
             params = {
-                "user.fields": "id,name,username,description,public_metrics,verified,location,created_at",
-                "expansions": "pinned_tweet_id"
+                "user.fields": "id,name,username"  # 最小化请求字段
             }
             
-            # 添加错误处理和重试逻辑
-            for attempt in range(3):
-                try:
-                    response = requests.get(
-                        endpoint,
-                        headers=self.headers,
-                        params=params,
-                        timeout=10
-                    )
-                    
-                    # 记录响应内容用于调试
-                    self.logger.info(f"API Response: {response.status_code}, {response.text}")
-                    
-                    if response.status_code == 200:
-                        data = response.json()
-                        # 缓存成功的响应
-                        self.cache.set(f"user_{username}", data)
-                        return data
-                    elif response.status_code == 404:
-                        raise Exception("用户不存在")
-                    elif response.status_code == 401:
-                        raise Exception("认证失败，请检查Token")
-                    else:
-                        raise Exception(f"API请求失败: {response.status_code}")
-                        
-                except requests.exceptions.RequestException as e:
-                    if attempt == 2:  # 最后一次尝试
-                        raise Exception(f"网络请求失败: {str(e)}")
-                    time.sleep(2)  # 重试前等待
-                    
+            response = requests.get(
+                endpoint,
+                headers=self.headers,
+                params=params,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                self.cache.set(cache_key, data)
+                return data
+            elif response.status_code == 429:
+                if cached_data := self.cache.get(cache_key):
+                    st.warning("达到API限制，使用缓存数据")
+                    return cached_data
+                raise Exception("达到API速率限制")
+            else:
+                raise Exception(f"API请求失败: {response.status_code}")
+                
         except Exception as e:
-            self.logger.error(f"获取用户信息失败: {str(e)}")
-            # 尝试从缓存获取
-            if cached_data := self.cache.get(f"user_{username}"):
+            if cached_data := self.cache.get(cache_key):
+                st.warning(f"API请求失败({str(e)})，使用缓存数据")
                 return cached_data
             raise
 
     def get_user_tweets(self, user_id: str) -> Dict:
         """获取用户最近7天的推文"""
         try:
-            endpoint = f"{self.API_BASE}/users/{user_id}/tweets"
-            params = {
-                "max_results": 10,  # Free Plan限制
-                "tweet.fields": "created_at,text",
-                "exclude": "retweets,replies",
-                "start_time": (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-            }
-            
+            # 先检查缓存
             cache_key = f"tweets_{user_id}"
             if cached_data := self.cache.get(cache_key):
                 st.info("使用缓存的推文数据")
                 return cached_data
             
-            try:
-                response = self._make_request(endpoint, params)
-                if response and 'data' in response:
-                    self.cache.set(cache_key, response)
-                return response
-            except Exception as e:
-                if "速率限制" in str(e):
-                    st.warning(str(e))
-                    if cached_data := self.cache.get(cache_key):
-                        return cached_data
-                raise
+            # 检查速率限制
+            self._check_rate_limit()
+            
+            endpoint = f"{self.API_BASE}/users/{user_id}/tweets"
+            params = {
+                "max_results": 5,  # Free Plan限制每次最多5条
+                "tweet.fields": "created_at,text",  # 最小化请求字段
+                "exclude": "retweets,replies",
+                "start_time": (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            }
+            
+            response = requests.get(
+                endpoint,
+                headers=self.headers,
+                params=params,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                self.cache.set(cache_key, data)
+                return data
+            elif response.status_code == 429:
+                if cached_data := self.cache.get(cache_key):
+                    st.warning("达到API限制，使用缓存数据")
+                    return cached_data
+                raise Exception("达到API速率限制")
+            else:
+                raise Exception(f"API请求失败: {response.status_code}")
                 
         except Exception as e:
             st.warning(f"获取推文失败: {str(e)}")
             return {"data": []}
 
     def _check_rate_limit(self):
-        """检并处理速率限制"""
+        """检查并处理速率限制"""
         current_time = datetime.now()
         
         # 如果超过时间窗口，重置限制
         if current_time >= self.rate_limit["reset_time"]:
-            self.rate_limit["remaining"] = self.rate_limit["requests_per_window"]
-            self.rate_limit["reset_time"] = current_time + timedelta(minutes=self.rate_limit["window_size"])
-            
-        # 如果剩余请求数不足，直接拒绝
-        if self.rate_limit["remaining"] <= 2:  # 保留2个请��额度作为缓冲
+            self.rate_limit["remaining"] = 15  # Free Plan实际限制
+            self.rate_limit["reset_time"] = current_time + timedelta(minutes=15)
+        
+        # 如果剩余请求数不足，直接使用缓存
+        if self.rate_limit["remaining"] <= 1:
             wait_time = (self.rate_limit["reset_time"] - current_time).total_seconds()
             if wait_time > 0:
-                minutes = int(wait_time / 60)
-                seconds = int(wait_time % 60)
-                raise Exception(f"达到速率限制，请等待{minutes}分{seconds}秒")
+                raise Exception("达到API速率限制")
 
     def _make_request(self, endpoint: str, params: Dict) -> Dict:
         """发送API请求"""
@@ -422,7 +424,7 @@ def analyze_twitter_profile(username: str) -> str:
 # X用户推文分析报告
 
 ## 推文分析
-- 分析时间范围：最近7���
+- 分析时间范围：最近7
 - 分析推文数量：{len(tweets_data.get('data', []))}条
 
 ### 主要话题
